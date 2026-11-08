@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.build/
+upstream/
+*.log
+.env
+.env.*
+secrets.env
+config.json
+rules.json
+*.db
+*.db-shm
+*.db-wal
+master.key
+connection.json

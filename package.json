@@ -1,0 +1,36 @@
+{
+  "name": "agent-autoloop-workbench",
+  "version": "1.0.0",
+  "description": "A local desktop workbench for Agent Autoloop.",
+  "author": "BorisPeng",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "desktop/main.cjs",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node server.mjs",
+    "desktop": "electron .",
+    "build:win": "node scripts/stage-node.mjs && electron-builder --win nsis --x64",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "com.borispeng.autoloop-workbench",
+    "productName": "Agent Autoloop Workbench",
+    "asar": true,
+    "files": ["desktop/**/*", "package.json"],
+    "extraResources": [
+      { "from": "server.mjs", "to": "workbench/server.mjs" },
+      { "from": "public", "to": "workbench/public" },
+      { "from": ".build/node.exe", "to": "node/node.exe" },
+      { "from": "third_party/NODE-LICENSE", "to": "node/LICENSE" },
+      { "from": "third_party/AGENT-AUTOLOOP-LICENSE", "to": "AGENT-AUTOLOOP-LICENSE" }
+    ],
+    "win": { "icon": "desktop/icon.ico", "target": ["nsis"], "artifactName": "Agent-Autoloop-Workbench-Setup-${version}-${arch}.${ext}" },
+    "nsis": { "oneClick": true, "perMachine": false, "createDesktopShortcut": true, "createStartMenuShortcut": true, "runAfterFinish": false }
+  }
+}

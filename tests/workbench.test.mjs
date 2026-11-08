@@ -1,0 +1,73 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
+
+test('workbench protects credentials and validates, routes and saves against an isolated hub', async () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const app = path.resolve(process.env.AGENT_AUTOLOOP_APP || path.join(root, '..', 'app'));
+  const home = await mkdtemp(path.join(tmpdir(), 'autoloop-workbench-'));
+  const requests = [];
+  const hub = http.createServer(async (req, res) => { let text=''; for await (const part of req) text += part; requests.push({url:req.url, authorization:req.headers.authorization, text}); res.setHeader('content-type','application/json'); res.end(JSON.stringify(req.url.startsWith('/proxy/v1/state') ? {seq:1,cards:[],runs:[]} : {ok:true,routed:['test']})); });
+  let child;
+  try {
+    hub.listen(0, '127.0.0.1'); await once(hub, 'listening');
+    await writeFile(path.join(home,'config.json'), JSON.stringify({url:`http://127.0.0.1:${hub.address().port}/proxy`,owner:'owner-secret',source:{name:'local',key:'source-secret'}}));
+    const fixture = await readFile(path.join(app,'tests','rules.fixture.json'),'utf8');
+    await writeFile(path.join(home,'rules.json'),fixture);
+    child=spawn(process.execPath,[path.join(root,'server.mjs')],{env:{...process.env,AGENT_AUTOLOOP_HOME:home,AGENT_AUTOLOOP_APP:app,WORKBENCH_PORT:'0'},stdio:['ignore','pipe','pipe']});
+    const [chunk]=await once(child.stdout,'data'); const base=chunk.toString().trim().split(' ').at(-1);
+    const html=await (await fetch(base)).text(); const token=html.match(/name="workbench-token" content="([a-f0-9]+)"/)[1];
+    assert.ok(!html.includes('owner-secret'));
+    assert.equal((await fetch(`${base}/api/state`)).status,403);
+    const headers={'x-workbench-token':token,'content-type':'application/json'};
+    assert.equal((await fetch(`${base}/api/state`,{headers:{...headers,origin:'https://other.example'}})).status,403);
+    assert.equal((await fetch(`${base}/api/state?before=3`,{headers})).status,200);
+    assert.equal(requests.at(-1).authorization,'Bearer owner-secret');
+    assert.equal(requests.at(-1).url,'/proxy/v1/state?before=3');
+    const action=await fetch(`${base}/api/action`,{method:'POST',headers,body:JSON.stringify({kind:'event',data:{id:'test',type:'test.event'}})});
+    assert.equal(action.status,200); assert.equal(requests.at(-1).authorization,'Bearer source-secret');
+    await fetch(`${base}/api/action`,{method:'POST',headers,body:JSON.stringify({kind:'pause',id:'测试 规则',data:{reason:'test'}})});
+    assert.equal(requests.at(-1).url,`/proxy/v1/rules/${encodeURIComponent('测试 规则')}/pause`);
+    await fetch(`${base}/api/action`,{method:'POST',headers,body:JSON.stringify({kind:'cancel',id:42,data:{}})});
+    assert.equal(requests.at(-1).url,'/proxy/v1/runs/42/cancel');
+    assert.equal(requests.at(-1).authorization,'Bearer owner-secret');
+    const current=await (await fetch(`${base}/api/rules`,{headers})).json();
+    const submit=(data)=>fetch(`${base}/api/rules`,{method:'POST',headers,body:JSON.stringify(data)});
+    assert.equal((await submit({text:'invalid json',hash:current.hash,save:true})).status,500);
+    assert.equal(await readFile(path.join(home,'rules.json'),'utf8'),fixture);
+    assert.equal((await submit({text:fixture,hash:current.hash,save:false})).status,200);
+    await writeFile(path.join(home,'rules.json'),fixture+'\n');
+    assert.equal((await submit({text:fixture,hash:current.hash,save:true})).status,409);
+    const latest=await (await fetch(`${base}/api/rules`,{headers})).json();
+    assert.equal((await submit({text:fixture,hash:latest.hash,save:true})).status,200);
+    assert.equal(await readFile(path.join(home,'rules.json'),'utf8'),fixture);
+    const cli=await (await fetch(`${base}/api/cli`,{method:'POST',headers,body:JSON.stringify({args:['check']})})).json();
+    assert.equal(cli.code,0);
+    const start = await (await fetch(`${base}/api/jobs`, {method:'POST',headers,body:JSON.stringify({args:['check']})})).json();
+    assert.ok(start.id);
+    let job;
+    for (let i=0;i<100;i++) { job=await (await fetch(`${base}/api/jobs/${start.id}`,{headers})).json(); if(job.done)break; await new Promise(resolve=>setTimeout(resolve,50)); }
+    assert.equal(job.done,true); assert.equal(job.code,0); assert.match(job.output,/规则没问题/);
+    assert.equal((await fetch(`${base}/api/jobs`,{method:'POST',headers,body:JSON.stringify({args:['unexpected-command']})})).status,500);
+    const getFile = async name => (await (await fetch(`${base}/api/settings/${name}`,{headers})).json());
+    const saveFile = (name,data) => fetch(`${base}/api/settings/${name}`,{method:'POST',headers,body:JSON.stringify(data)});
+    const settings=await getFile('config');
+    assert.match(settings.text,/owner-secret/);
+    assert.equal((await saveFile('config',{text:'{}',hash:settings.hash})).status,500);
+    assert.equal((await saveFile('config',{text:settings.text,hash:'stale'})).status,409);
+    assert.equal((await saveFile('config',{text:settings.text,hash:settings.hash})).status,200);
+    const secrets=await getFile('secrets'); assert.equal(secrets.text,'');
+    assert.equal((await saveFile('secrets',{text:'AGENT_AUTOLOOP_SECRET_TEST=example\n',hash:secrets.hash})).status,200);
+    assert.equal(await readFile(path.join(home,'secrets.env'),'utf8'),'AGENT_AUTOLOOP_SECRET_TEST=example\n');
+    assert.equal((await saveFile('secrets',{text:'X=changed',hash:secrets.hash})).status,409);
+  } finally {
+    if(child && child.exitCode===null){child.kill();await once(child,'exit');}
+    await new Promise(resolve=>hub.close(resolve)); await rm(home,{recursive:true,force:true});
+  }
+});

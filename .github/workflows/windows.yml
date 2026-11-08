@@ -1,0 +1,37 @@
+name: Windows build and test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: KKKKhazix/agent-autoloop
+          ref: 512f9fd4b1acc956727b64134585b15f1c5c7ddd
+          path: upstream
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - run: npm ci
+      - run: npm test
+        env:
+          AGENT_AUTOLOOP_APP: ${{ github.workspace }}\upstream
+      - run: npm run build:win
+      - run: node --test tests/desktop.test.mjs
+        env:
+          AGENT_AUTOLOOP_APP: ${{ github.workspace }}\upstream
+          WORKBENCH_DESKTOP_EXE: ${{ github.workspace }}\dist\win-unpacked\Agent Autoloop Workbench.exe
+          WORKBENCH_TEST_NO_SYSTEM_NODE: '1'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: agent-autoloop-workbench-windows-x64
+          path: dist/Agent-Autoloop-Workbench-Setup-*.exe
