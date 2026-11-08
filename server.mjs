@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { readFile, writeFile, rename, unlink } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -9,6 +9,7 @@ import { parseEnv } from 'node:util';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { atomicWrite, FileConflict } from './atomic-write.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const home = path.resolve(process.env.AGENT_AUTOLOOP_HOME || (existsSync(path.join(root, '..', 'config.json')) ? path.join(root, '..') : path.join(homedir(), '.agent-autoloop')));
@@ -111,10 +112,6 @@ async function validateSettings(name, text) {
   if (value.source !== undefined && (!value.source || typeof value.source !== 'object' || typeof value.source.name !== 'string' || typeof value.source.key !== 'string')) throw new Error('source 必须包含 name 和 key');
   if (value.channels !== undefined && (!value.channels || typeof value.channels !== 'object' || Array.isArray(value.channels))) throw new Error('channels 必须是对象');
 }
-async function atomicWrite(file, text) {
-  const tmp = `${file}.workbench-${randomBytes(6).toString('hex')}.tmp`;
-  try { await writeFile(tmp, text, { flag: 'wx', mode: 0o600 }); await rename(tmp, file); } finally { await unlink(tmp).catch(() => {}); }
-}
 function removeEnvName(text, name) {
   const lines = text.match(/[^\n]*(?:\n|$)/g)?.filter(Boolean) ?? [];
   let quote = '', removing = false, result = '';
@@ -205,8 +202,7 @@ const server = http.createServer(async (req, res) => {
       const data = await body(req); if (typeof data.text !== 'string') throw new Error('规则内容无效');
       await validateRules(data.text);
       if (data.save) {
-        if (hash(await readFile(rulesFile, 'utf8')) !== data.hash) return json(res, 409, { error: '规则文件已被其他程序修改，请重新加载后再保存' });
-        await atomicWrite(rulesFile, data.text);
+        await atomicWrite(rulesFile, data.text, data.hash);
       }
       return json(res, 200, { ok: true, hash: hash(data.text) });
     }
@@ -216,16 +212,20 @@ const server = http.createServer(async (req, res) => {
       const name = settingsRoute[1], data = await body(req);
       if (typeof data.text !== 'string') throw new Error('文件内容无效');
       await validateSettings(name, data.text);
-      if (hash(await settingsText(name)) !== data.hash) return json(res, 409, { error: '文件已被其他程序修改，请重新加载后再保存' });
-      await atomicWrite(settings[name], data.text);
+      await atomicWrite(settings[name], data.text, data.hash, {allowMissing:name==='secrets'});
       return json(res, 200, { ok: true, hash: hash(data.text) });
     }
     if (req.method === 'GET' && url.pathname === '/api/secrets') { const text=await settingsText('secrets'); return json(res,200,{ names:Object.keys(parseEnv(text)).sort(),hash:hash(text) }); }
+    if (req.method === 'GET' && url.pathname === '/api/secrets/value') {
+      const name=url.searchParams.get('name'),values=parseEnv(await settingsText('secrets'));
+      if(!name||!Object.hasOwn(values,name))return json(res,404,{error:'没有这个环境变量'});
+      return json(res,200,{name,value:values[name]});
+    }
     if (req.method === 'POST' && url.pathname === '/api/secrets') {
       const data=await body(req),text=await settingsText('secrets');
       if(hash(text)!==data.hash)return json(res,409,{error:'设置已被其他程序修改，请重新打开后再试'});
       const changed=changeEnv(text,data.name,data.action,data.value);
-      await atomicWrite(settings.secrets,changed);
+      await atomicWrite(settings.secrets,changed,data.hash,{allowMissing:true});
       return json(res,200,{ok:true,hash:hash(changed)});
     }
     if (req.method === 'POST' && url.pathname === '/api/probe') {
@@ -261,7 +261,7 @@ const server = http.createServer(async (req, res) => {
       return job ? json(res, 200, job) : json(res, 404, { error: '没有这个操作记录，工作台可能已重启' });
     }
     return json(res, 404, { error: '没有这个接口' });
-  } catch (error) { return json(res, 500, { error: error.message || String(error) }); }
+  } catch (error) { return json(res, error instanceof FileConflict ? 409 : 500, { error: error.message || String(error) }); }
 });
 
 server.listen(Number(process.env.WORKBENCH_PORT || 3390), '127.0.0.1', () => console.log(`Workbench: http://127.0.0.1:${server.address().port}`));

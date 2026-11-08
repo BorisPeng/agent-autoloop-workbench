@@ -143,6 +143,7 @@ function showTreeEditor(kind,data,hash,section='') {
   const reference=(path)=>{refs.push(path);return refs.length-1;};
   const controls=(value,path)=>{
     const type=shape(value), id=reference(path), key=String(path.at(-1)??''), label=Array.isArray(get(path.slice(0,-1)))?(value?.name || `第 ${Number(key)+1} 项`):(formLabels[key]||(value?.name?`${value.name}（${key}）`:key)||title);
+    const sensitive=kind==='config'&&(key==='owner'||(path[0]==='channels'&&key==='url')||/key|secret|token|password|authorization|credential/i.test(key));
     const removable=path.length?`<button type="button" class="link-button danger" data-tree-remove="${id}">删除</button>`:'';
     if(type==='object'||type==='array') {
       const entries=Object.entries(value);
@@ -162,6 +163,7 @@ function showTreeEditor(kind,data,hash,section='') {
     else if(type==='string'&&enums[key]) { const choices=enums[key];input=`<select data-tree-value="${id}" data-type="string">${choices.map(([v,l])=>option(v,l,v===value)).join('')}${!choices.some(([v])=>v===value)?option(value,value||'请选择',true):''}</select>`; }
     else if(type==='string'&&key==='use') {const choices=[['codex','Codex'],['claude','Claude Code'],['dsh','DeepSeek Harness'],['acp','ACP'],['command','自定义命令'],['desktop','桌面通知'],['feishu','飞书'],['webhook','Webhook']];input=`<input list="tree-use-${id}" data-tree-value="${id}" data-type="string" value="${esc(value)}"><datalist id="tree-use-${id}">${choices.map(([v,l])=>option(v,l)).join('')}</datalist>`;}
     else if(type==='string'&&key==='cwd'&&window.workbench?.chooseDirectory)input=`<div class="copy-row"><input data-tree-value="${id}" data-type="string" value="${esc(value)}"><button type="button" class="button" data-tree-directory="${id}">选择文件夹</button></div>`;
+    else if(type==='string'&&sensitive)input=`<div class="copy-row"><input type="password" data-tree-value="${id}" data-type="string" value="${esc(value)}"><button type="button" class="button" data-tree-reveal="${id}">显示</button></div>`;
     else if(type==='string'&&(key==='prompt'||key==='text'||String(value).includes('\n')))input=`<textarea rows="3" data-tree-value="${id}" data-type="string">${esc(value)}</textarea>`;
     else input=`<input type="${type==='number'?'number':/key|secret|token|password/i.test(key)?'password':'text'}" data-tree-value="${id}" data-type="${esc(type)}" value="${esc(value)}">`;
     return `<div class="tree-field"><label><span>${esc(label)}</span>${input}</label>${removable}</div>`;
@@ -182,6 +184,7 @@ function showTreeEditor(kind,data,hash,section='') {
     if(key)key.hidden=!custom||Array.isArray(get(path));if(type)type.hidden=!custom||collection;
   });
   container.addEventListener('click',async e=>{
+    const reveal=e.target.closest('[data-tree-reveal]');if(reveal){const input=container.querySelector(`[data-tree-value="${reveal.dataset.treeReveal}"]`);if(input){input.type=input.type==='password'?'text':'password';reveal.textContent=input.type==='password'?'显示':'隐藏';}return;}
     const directory=e.target.closest('[data-tree-directory]');if(directory){try{const value=await window.workbench.chooseDirectory();if(value){const input=container.querySelector(`[data-tree-value="${directory.dataset.treeDirectory}"]`);if(input){input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));}}}catch(error){toast(error.message);}return;}
     const schedule=e.target.closest('[data-tree-schedule]');if(schedule){const pane=container.querySelector(`[data-tree-schedule-pane="${schedule.dataset.treeSchedule}"]`);pane.hidden=!pane.hidden;return;}
     const apply=e.target.closest('[data-tree-schedule-apply]');if(apply){const id=Number(apply.dataset.treeScheduleApply),path=refs[id],pane=container.querySelector(`[data-tree-schedule-pane="${id}"]`);try{get(path.slice(0,-1))[path.at(-1)]=scheduleValue(pane);pane.hidden=true;rulesDirty=true;toast('已选择时间，保存设置后生效');}catch(error){toast(error.message);}return;}
@@ -207,8 +210,9 @@ async function showRulesSettings(section='') { const {data,hash}=await readRules
 async function showConnectionSettings() { const r=await api('/api/settings/config');let data;try{data=JSON.parse(r.text);}catch{throw new Error('现有连接设置无法读取，请从备份恢复。');}showTreeEditor('config',data,r.hash); }
 async function showSecrets() {
   const result=await api('/api/secrets');
-  modal('密钥与环境变量',`<p class="footnote">现有值不会显示。更改后需要重启中台；其他内容和注释会保留。</p>${result.names.length?result.names.map(name=>`<div class="row"><div class="row-main"><div class="row-title">${esc(name)}</div></div>${btn('替换','secret-edit',name)}${btn('删除','secret-remove',name,'danger')}</div>`).join(''):empty('还没有环境变量') }<div class="actions">${btn('添加','secret-edit','','primary')}</div>`);
+  modal('密钥与环境变量',`<p class="footnote">更改后需要重启中台；其他内容和注释会保留。</p>${result.names.length?result.names.map(name=>`<div class="row"><div class="row-main"><div class="row-title">${esc(name)}</div></div>${btn('查看','secret-view',name)}${btn('替换','secret-edit',name)}${btn('删除','secret-remove',name,'danger')}</div>`).join(''):empty('还没有环境变量') }<div class="actions">${btn('添加','secret-edit','','primary')}</div>`);
 }
+async function viewSecret(name) {const result=await api(`/api/secrets/value?name=${encodeURIComponent(name)}`);modal('查看环境变量',`<label class="form-field">${esc(name)}<textarea id="secret-value" rows="4" readonly>${esc(result.value)}</textarea></label><div class="actions">${btn('复制','copy-value','secret-value')}${btn('返回','settings','secrets')}</div>`);}
 async function editSecret(name='') {
   const initial=await api('/api/secrets');
   modal(name?'替换环境变量':'添加环境变量',form(`${name?`<p class="detail-text">${esc(name)}</p>`:field('名称','name','例如 AGENT_AUTOLOOP_SECRET_GITHUB')}${field('新值','value','请输入完整的新值','','password')}`,'保存'));

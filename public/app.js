@@ -157,6 +157,7 @@ async function clickAction(a,id) { switch(a) {
   case 'rules-section':if(rulesDirty&&!confirm('草稿尚未保存，确定离开？'))return;if($('#dialog').open)closeModal();await showRulesSettings(id);break;
   case 'settings':if(rulesDirty&&!confirm('重新加载会丢弃未保存的草稿，确定继续？'))return;if($('#dialog').open)closeModal();if(id==='config')await showConnectionSettings();else await showSecrets();break;
   case 'secret-edit':await editSecret(id);break;
+  case 'secret-view':await viewSecret(id);break;
   case 'secret-remove':await removeSecret(id);break;
   case 'event':showEvent();break;
   case 'try':{if(!confirm('开始试跑会发送 try.start 事件并调用已配置的 Agent。继续？'))return;const stamp=Date.now();const r=await post('/api/action',{kind:'event',data:{id:`try-${stamp}`,type:'try.start',subject:`#${stamp}`}});toast(r.routed?.length?'试跑已启动，请在待处理卡片查看进展':'事件已记录，但没有规则接收 try.start');await refresh(true);break;}

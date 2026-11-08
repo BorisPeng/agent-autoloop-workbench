@@ -78,6 +78,9 @@ test('workbench protects credentials and validates, routes and saves against an 
     assert.equal((await fetch(`${base}/api/secrets`,{method:'POST',headers,body:JSON.stringify({action:'set',value:'invalid',hash:secretsForm.hash})})).status,500);
     const update=await fetch(`${base}/api/secrets`,{method:'POST',headers,body:JSON.stringify({action:'set',name:'EDIT',value:`both ' and " quotes #`,hash:secretsForm.hash})});
     assert.equal(update.status,200);let text=await readFile(secretsPath,'utf8');assert.match(text,/# keep comment/);assert.equal(parseEnv(text).KEEP,'first\nline');assert.equal(parseEnv(text).EDIT,`both ' and " quotes #`);
+    assert.equal((await fetch(`${base}/api/secrets/value?name=EDIT`)).status,403);
+    const revealed=await (await fetch(`${base}/api/secrets/value?name=EDIT`,{headers})).json();assert.deepEqual(revealed,{name:'EDIT',value:`both ' and " quotes #`});
+    assert.equal((await fetch(`${base}/api/secrets/value?name=MISSING`,{headers})).status,404);
     const refreshed=await (await fetch(`${base}/api/secrets`,{headers})).json();
     assert.equal((await fetch(`${base}/api/secrets`,{method:'POST',headers,body:JSON.stringify({action:'remove',name:'EDIT',hash:refreshed.hash})})).status,200);
     text=await readFile(secretsPath,'utf8');assert.equal(parseEnv(text).EDIT,undefined);assert.equal(parseEnv(text).KEEP,'first\nline');

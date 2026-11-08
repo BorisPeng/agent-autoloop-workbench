@@ -180,6 +180,9 @@ test('real hub routes a workbench event, receives an answer and completes the fo
     if(browser) {
       await browser.evaluate("document.querySelector('[data-page=tools]').click(); document.querySelector('[data-action=settings][data-id=config]').click()");
       await waitFor(()=>browser.evaluate("!!document.querySelector('#tree-editor')"),'configuration editor did not open');
+      assert.equal(await browser.evaluate("[...document.querySelectorAll('.tree-field label')].find(e=>e.querySelector('span').textContent==='本人密钥').querySelector('input').type"),'password');
+      await browser.evaluate("[...document.querySelectorAll('.tree-field label')].find(e=>e.querySelector('span').textContent==='本人密钥').querySelector('[data-tree-reveal]').click()");
+      assert.equal(await browser.evaluate("[...document.querySelectorAll('.tree-field label')].find(e=>e.querySelector('span').textContent==='本人密钥').querySelector('input').type"),'text');
       await browser.evaluate(`(()=>{const g=[...document.querySelectorAll('details')].find(e=>e.dataset.treePath===JSON.stringify(['worker']));g.open=true;const c=g.querySelector(':scope > .tree-body > .tree-add [data-tree-choice]');c.value='capacity';c.dispatchEvent(new Event('change'));g.querySelector(':scope > .tree-body > .tree-add [data-tree-add]').click();})()`);
       await browser.evaluate(`(()=>{const f=[...document.querySelectorAll('.tree-field label')].find(e=>e.querySelector('span').textContent==='接单容量');const i=f.querySelector('input');i.value='3';i.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#tree-save').click()})()`);
       const saved=await waitFor(async()=>{const c=JSON.parse(await readFile(configPath,'utf8'));return c.worker.capacity===3?c:null;},'configuration form did not save');
@@ -192,6 +195,10 @@ test('real hub routes a workbench event, receives an answer and completes the fo
       await browser.evaluate("document.querySelector('[name=name]').value='TEST_SECRET';document.querySelector('[name=value]').value='test-value';document.querySelector('#action-form').requestSubmit()");
       await waitFor(async()=> (await readFile(path.join(home,'secrets.env'),'utf8').catch(()=>'' )).includes('TEST_SECRET='),'secret form did not save');
       await waitFor(()=>browser.evaluate("document.querySelector('#dialog-title').textContent==='密钥与环境变量'"),'secret list did not reopen');
+      await browser.evaluate("document.querySelector('[data-action=secret-view][data-id=TEST_SECRET]').click()");
+      await waitFor(()=>browser.evaluate("document.querySelector('#secret-value')?.value==='test-value'"),'secret value did not open');
+      await browser.evaluate("document.querySelector('[data-action=settings][data-id=secrets]').click()");
+      await waitFor(()=>browser.evaluate("document.querySelector('#dialog-title').textContent==='密钥与环境变量'"),'secret list did not return');
       await browser.evaluate("document.querySelector('[data-action=secret-remove][data-id=TEST_SECRET]').click()");
       await waitFor(async()=> !(await readFile(path.join(home,'secrets.env'),'utf8')).includes('TEST_SECRET='),'secret form did not delete');
       await waitFor(()=>browser.evaluate("document.querySelector('#dialog-title').textContent==='密钥与环境变量' && !document.querySelector('[data-action=secret-remove][data-id=TEST_SECRET]')"),'secret list did not update');

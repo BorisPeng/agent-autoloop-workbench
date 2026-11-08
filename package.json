@@ -1,6 +1,6 @@
 {
   "name": "agent-autoloop-workbench",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "A local desktop workbench for Agent Autoloop.",
   "author": "BorisPeng",
   "license": "MIT",
@@ -25,6 +25,7 @@
     "files": ["desktop/**/*", "package.json"],
     "extraResources": [
       { "from": "server.mjs", "to": "workbench/server.mjs" },
+      { "from": "atomic-write.mjs", "to": "workbench/atomic-write.mjs" },
       { "from": "public", "to": "workbench/public" },
       { "from": ".build/node.exe", "to": "node/node.exe" },
       { "from": "third_party/NODE-LICENSE", "to": "node/LICENSE" },
