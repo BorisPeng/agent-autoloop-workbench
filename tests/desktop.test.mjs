@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, stat } from 'node:fs
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
@@ -47,6 +47,29 @@ test('packaged desktop starts, renders, sends an event, and closes its local ser
     if(process.env.WORKBENCH_TEST_NO_SYSTEM_NODE==='1') assert.equal(await stat(path.join(temp,'profile','runtime','v24.16.0','node.exe')).then(s=>s.isFile(),()=>false),true);
     base=await evaluate('location.origin');
     assert.equal(await evaluate('typeof window.require'),'undefined');
+    assert.equal(await evaluate('typeof window.workbench?.chooseDirectory'),'function');
+    assert.equal(await evaluate('typeof window.workbench?.chooseFile'),'function');
+    await evaluate("document.querySelector('#primary').click()");
+    await waitFor(()=>evaluate("document.querySelector('#dialog').open && document.querySelector('#dialog-title').textContent==='新建任务'"),'desktop task form did not open');
+    assert.equal(await evaluate("!!document.querySelector('[data-action=choose-directory]')"),true);
+    if(process.platform==='win32'&&process.env.WORKBENCH_VERIFY_CHOOSER==='1') {
+      await evaluate("window.__chooser='pending';window.workbench.chooseDirectory().then(v=>window.__chooser=v===null?'cancelled':'chosen').catch(e=>window.__chooser='error:'+e.message);true");
+      const script=`Add-Type @'\nusing System; using System.Text; using System.Runtime.InteropServices;\npublic static class FolderDialogTest {\n  delegate bool EnumCallback(IntPtr h, IntPtr l);\n  [DllImport("user32.dll")] static extern bool EnumWindows(EnumCallback callback, IntPtr l);\n  [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);\n  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);\n  [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);\n  public static bool CloseFor(uint target) { bool closed=false; EnumWindows((h,l)=>{ uint pid; GetWindowThreadProcessId(h,out pid); var title=new StringBuilder(256); GetWindowText(h,title,256); if(pid==target && title.ToString().Contains("选择文件夹")) { PostMessage(h,0x10,IntPtr.Zero,IntPtr.Zero); closed=true; } return true; },IntPtr.Zero); return closed; }\n}\n'@\nfor($i=0;$i -lt 60;$i++){ if([FolderDialogTest]::CloseFor(${child.pid})){exit 0}; Start-Sleep -Milliseconds 150 }; exit 1`;
+      const closed=spawnSync(path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-NonInteractive','-Command',script],{windowsHide:true,encoding:'utf8',timeout:15000});
+      assert.equal(closed.status,0,`folder chooser was not displayed: ${closed.stderr}`);
+      await waitFor(()=>evaluate("window.__chooser==='cancelled'"),'folder chooser did not return cancellation');
+    }
+    await evaluate(`document.querySelector('[name=name]').value='桌面测试任务';document.querySelector('[name=prompt]').value='完成测试';document.querySelector('[name=cwd]').value=${JSON.stringify(home)};document.querySelector('[name=model]').value='sonnet';document.querySelector('[name=model]').dispatchEvent(new Event('change'));document.querySelector('[name=effort]').value='high';document.querySelector('#action-form').requestSubmit()`);
+    const rules=await waitFor(async()=>{const r=JSON.parse(await readFile(path.join(home,'rules.json'),'utf8'));return r.rules.find(x=>x.name==='桌面测试任务')?r:null;},'desktop task was not saved');
+    const task=rules.rules.find(x=>x.name==='桌面测试任务');assert.equal(rules.agents[task.to].model,'sonnet');assert.equal(rules.agents[task.to].effort,'high');assert.equal(rules.agents.a1.model,'m1');
+    await waitFor(()=>evaluate("!document.querySelector('#dialog').open"),'desktop task form did not close');
+    await writeFile(path.join(home,'rules.json'),JSON.stringify({sources:{},agents:rules.agents,channels:{},rules:[],elsewhere:[]}));
+    await evaluate("document.querySelector('#primary').click()");
+    await waitFor(()=>evaluate("document.querySelector('#dialog').open && document.querySelector('#dialog-title').textContent==='新建任务'"),'scheduled task form did not open');
+    await evaluate(`document.querySelector('[name=name]').value='无来源定时任务';document.querySelector('[name=prompt]').value='完成测试';document.querySelector('[name=cwd]').value=${JSON.stringify(home)};document.querySelector('[name=trigger]').value='daily';document.querySelector('[name=trigger]').dispatchEvent(new Event('change'));document.querySelector('#action-form').requestSubmit()`);
+    const scheduled=await waitFor(async()=>{const r=JSON.parse(await readFile(path.join(home,'rules.json'),'utf8'));return r.rules.find(x=>x.name==='无来源定时任务')?r:null;},'scheduled task without event source was not saved');
+    assert.equal(scheduled.rules[0].when.cron,'0 9 * * *');
+    await waitFor(()=>evaluate("!document.querySelector('#dialog').open"),'scheduled task form did not close');
     await evaluate("document.querySelector('[data-page=tools]').click();document.querySelector('[data-action=event]').click();document.querySelector('[name=type]').value='demo.start';document.querySelector('[name=id]').value='desktop-test';document.querySelector('#action-form').requestSubmit()");
     await waitFor(()=>requests.some(r=>r.url==='/v1/events'),'desktop event was not sent');
     const event=requests.find(r=>r.url==='/v1/events'); assert.equal(event.auth,'Bearer test-source'); assert.equal(JSON.parse(event.body).id,'desktop-test');

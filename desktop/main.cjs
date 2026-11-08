@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, Menu, session } = require('electron');
+const { app, BrowserWindow, dialog, Menu, session, ipcMain } = require('electron');
 const { spawn, spawnSync } = require('node:child_process');
 const { existsSync, mkdirSync, readFileSync, copyFileSync, writeFileSync } = require('node:fs');
 const path = require('node:path');
@@ -86,7 +86,7 @@ function startServer(settings) {
 }
 function createWindow(url) {
   const origin = new URL(url).origin;
-  window = new BrowserWindow({ title: 'Agent Autoloop 工作台', width: 1440, height: 960, minWidth: 780, minHeight: 600, backgroundColor: '#f5f6f5', show: false, icon: path.join(__dirname, 'icon.png'), webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true } });
+  window = new BrowserWindow({ title: 'Agent Autoloop 工作台', width: 1440, height: 960, minWidth: 780, minHeight: 600, backgroundColor: '#f5f6f5', show: false, icon: path.join(__dirname, 'icon.png'), webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, preload: path.join(__dirname, 'preload.cjs') } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', (event, target) => { try { if (new URL(target).origin !== origin) event.preventDefault(); } catch { event.preventDefault(); } });
   window.webContents.on('will-redirect', (event, target) => { try { if (new URL(target).origin !== origin) event.preventDefault(); } catch { event.preventDefault(); } });
@@ -105,6 +105,16 @@ else {
   app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.focus(); } });
   app.whenReady().then(async () => {
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    ipcMain.handle('choose-directory', async event => {
+      if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('请求来源无效');
+      const selection = await dialog.showOpenDialog(window, { title: '选择文件夹', properties: ['openDirectory', 'createDirectory'] });
+      return selection.canceled ? null : selection.filePaths[0];
+    });
+    ipcMain.handle('choose-file', async event => {
+      if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('请求来源无效');
+      const selection = await dialog.showOpenDialog(window, { title: '选择文件', properties: ['openFile'] });
+      return selection.canceled ? null : selection.filePaths[0];
+    });
     try { const settings = await connection(); if (!settings) return app.quit(); createMenu(); createWindow(await startServer(settings)); }
     catch (error) { dialog.showErrorBox('无法启动工作台', error.message); app.quit(); }
   });

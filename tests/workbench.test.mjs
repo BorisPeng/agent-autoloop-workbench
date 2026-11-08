@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
 
 test('workbench protects credentials and validates, routes and saves against an isolated hub', async () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -20,18 +21,23 @@ test('workbench protects credentials and validates, routes and saves against an 
     await writeFile(path.join(home,'config.json'), JSON.stringify({url:`http://127.0.0.1:${hub.address().port}/proxy`,owner:'owner-secret',source:{name:'local',key:'source-secret'}}));
     const fixture = await readFile(path.join(app,'tests','rules.fixture.json'),'utf8');
     await writeFile(path.join(home,'rules.json'),fixture);
-    child=spawn(process.execPath,[path.join(root,'server.mjs')],{env:{...process.env,AGENT_AUTOLOOP_HOME:home,AGENT_AUTOLOOP_APP:app,WORKBENCH_PORT:'0'},stdio:['ignore','pipe','pipe']});
+    const codexHome=path.join(home,'codex');await mkdir(codexHome);
+    await writeFile(path.join(codexHome,'models_cache.json'),JSON.stringify({identity:'not-for-client',models:[{slug:'model-a',display_name:'模型 A',visibility:'list',supported_reasoning_levels:[{effort:'high'}]},{slug:'hidden',visibility:'hide'}]}));
+    child=spawn(process.execPath,[path.join(root,'server.mjs')],{env:{...process.env,AGENT_AUTOLOOP_HOME:home,AGENT_AUTOLOOP_APP:app,CODEX_HOME:codexHome,WORKBENCH_PORT:'0'},stdio:['ignore','pipe','pipe']});
     const [chunk]=await once(child.stdout,'data'); const base=chunk.toString().trim().split(' ').at(-1);
     const html=await (await fetch(base)).text(); const token=html.match(/name="workbench-token" content="([a-f0-9]+)"/)[1];
     assert.ok(!html.includes('owner-secret'));
     assert.equal((await fetch(`${base}/api/state`)).status,403);
     const headers={'x-workbench-token':token,'content-type':'application/json'};
+    const models=await (await fetch(`${base}/api/models`,{headers})).json();assert.deepEqual(models,{models:[{id:'model-a',name:'模型 A',efforts:['high']}]});
     assert.equal((await fetch(`${base}/api/state`,{headers:{...headers,origin:'https://other.example'}})).status,403);
     assert.equal((await fetch(`${base}/api/state?before=3`,{headers})).status,200);
     assert.equal(requests.at(-1).authorization,'Bearer owner-secret');
     assert.equal(requests.at(-1).url,'/proxy/v1/state?before=3');
     const action=await fetch(`${base}/api/action`,{method:'POST',headers,body:JSON.stringify({kind:'event',data:{id:'test',type:'test.event'}})});
     assert.equal(action.status,200); assert.equal(requests.at(-1).authorization,'Bearer source-secret');
+    assert.equal((await fetch(`${base}/api/action`,{method:'POST',headers,body:JSON.stringify({kind:'event',sourceKey:'other-source-key',data:{id:'other',type:'test.event'}})})).status,200);
+    assert.equal(requests.at(-1).authorization,'Bearer other-source-key'); assert.equal(requests.at(-1).text.includes('other-source-key'),false);
     await fetch(`${base}/api/action`,{method:'POST',headers,body:JSON.stringify({kind:'pause',id:'测试 规则',data:{reason:'test'}})});
     assert.equal(requests.at(-1).url,`/proxy/v1/rules/${encodeURIComponent('测试 规则')}/pause`);
     await fetch(`${base}/api/action`,{method:'POST',headers,body:JSON.stringify({kind:'cancel',id:42,data:{}})});
@@ -66,6 +72,15 @@ test('workbench protects credentials and validates, routes and saves against an 
     assert.equal((await saveFile('secrets',{text:'AGENT_AUTOLOOP_SECRET_TEST=example\n',hash:secrets.hash})).status,200);
     assert.equal(await readFile(path.join(home,'secrets.env'),'utf8'),'AGENT_AUTOLOOP_SECRET_TEST=example\n');
     assert.equal((await saveFile('secrets',{text:'X=changed',hash:secrets.hash})).status,409);
+    const secretsPath=path.join(home,'secrets.env');
+    await writeFile(secretsPath,'# keep comment\nKEEP="first\nline"\nexport EDIT=old\nEDIT=older\n');
+    const secretsForm=await (await fetch(`${base}/api/secrets`,{headers})).json(); assert.deepEqual(secretsForm.names,['EDIT','KEEP']);
+    assert.equal((await fetch(`${base}/api/secrets`,{method:'POST',headers,body:JSON.stringify({action:'set',value:'invalid',hash:secretsForm.hash})})).status,500);
+    const update=await fetch(`${base}/api/secrets`,{method:'POST',headers,body:JSON.stringify({action:'set',name:'EDIT',value:`both ' and " quotes #`,hash:secretsForm.hash})});
+    assert.equal(update.status,200);let text=await readFile(secretsPath,'utf8');assert.match(text,/# keep comment/);assert.equal(parseEnv(text).KEEP,'first\nline');assert.equal(parseEnv(text).EDIT,`both ' and " quotes #`);
+    const refreshed=await (await fetch(`${base}/api/secrets`,{headers})).json();
+    assert.equal((await fetch(`${base}/api/secrets`,{method:'POST',headers,body:JSON.stringify({action:'remove',name:'EDIT',hash:refreshed.hash})})).status,200);
+    text=await readFile(secretsPath,'utf8');assert.equal(parseEnv(text).EDIT,undefined);assert.equal(parseEnv(text).KEEP,'first\nline');
   } finally {
     if(child && child.exitCode===null){child.kill();await once(child,'exit');}
     await new Promise(resolve=>hub.close(resolve)); await rm(home,{recursive:true,force:true});

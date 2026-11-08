@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { Readable } from 'node:stream';
+import { parseEnv } from 'node:util';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -33,9 +34,9 @@ async function body(req) {
 }
 async function config() { return JSON.parse(await readFile(path.join(home, 'config.json'), 'utf8')); }
 const hubUrl = (base, endpoint) => base.replace(/\/$/, '') + endpoint;
-async function hub(method, endpoint, data, source = false) {
+async function hub(method, endpoint, data, source = false, sourceKey) {
   const c = await config();
-  const key = source ? c.source?.key : c.owner;
+  const key = source ? (sourceKey || c.source?.key) : c.owner;
   if (!key) throw new Error(source ? '本机没有来源密钥' : '本机没有本人密钥');
   const response = await fetch(hubUrl(c.url, endpoint), { method, headers: { authorization: `Bearer ${key}`, ...(data !== undefined ? { 'content-type': 'application/json' } : {}) }, ...(data !== undefined ? { body: JSON.stringify(data) } : {}), signal: AbortSignal.timeout(12000) });
   const text = await response.text();
@@ -46,11 +47,15 @@ async function hub(method, endpoint, data, source = false) {
 function checkCommand(args, input) {
   if (!Array.isArray(args) || !args.length || !commands.has(args[0]) || args.some(x => typeof x !== 'string' || x.length > 10000) || typeof input !== 'string') throw new Error('命令参数无效');
 }
-function runCli(args, input = '') {
-  checkCommand(args, input);
-  const job = { id: randomBytes(16).toString('hex'), command: args[0], startedAt: new Date().toISOString(), done: false, code: null, output: '', truncated: false };
+function createJob(command) {
+  const job = { id: randomBytes(16).toString('hex'), command, startedAt: new Date().toISOString(), done: false, code: null, output: '', truncated: false };
   jobs.set(job.id, job);
   for (const [id, old] of jobs) { if (jobs.size <= 20) break; if (old.done) jobs.delete(id); }
+  return job;
+}
+function runCli(args, input = '') {
+  checkCommand(args, input);
+  const job = createJob(args[0]);
   const child = spawn(process.execPath, [cli, ...args], { cwd: app, env: { ...process.env, AGENT_AUTOLOOP_HOME: home, AGENT_AUTOLOOP_RULES: rulesFile }, windowsHide: true, shell: false });
   const stdout = new StringDecoder('utf8'), stderr = new StringDecoder('utf8');
   const collect = (text) => {
@@ -110,6 +115,39 @@ async function atomicWrite(file, text) {
   const tmp = `${file}.workbench-${randomBytes(6).toString('hex')}.tmp`;
   try { await writeFile(tmp, text, { flag: 'wx', mode: 0o600 }); await rename(tmp, file); } finally { await unlink(tmp).catch(() => {}); }
 }
+function removeEnvName(text, name) {
+  const lines = text.match(/[^\n]*(?:\n|$)/g)?.filter(Boolean) ?? [];
+  let quote = '', removing = false, result = '';
+  for (const line of lines) {
+    if (quote) { if (!removing) result += line; if (line.includes(quote)) { quote = ''; removing = false; } continue; }
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^\r\n]*)/.exec(line);
+    if (!match) { result += line; continue; }
+    removing = match[1] === name;
+    const value = match[2].trimStart(), first = value[0];
+    if (["'", '"', '`'].includes(first) && !value.slice(1).includes(first)) quote = first;
+    if (!removing) result += line;
+    if (!quote) removing = false;
+  }
+  return result;
+}
+function encodeEnvValue(value) {
+  if (typeof value !== 'string' || value.includes('\0')) throw new Error('密钥内容无效');
+  const candidates = ["'", '"', '`'].filter(q => !value.includes(q)).map(q => `${q}${value}${q}`);
+  if (!/[\r\n]/.test(value)) candidates.push(value);
+  for (const encoded of candidates) if (parseEnv(`WORKBENCH_VALUE=${encoded}\n`).WORKBENCH_VALUE === value) return encoded;
+  throw new Error('该内容无法安全写入环境变量，请更换凭据或使用来源程序自己的凭据管理方式');
+}
+function changeEnv(text, name, action, value) {
+  if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('名称只能包含英文字母、数字和下划线，且不能以数字开头');
+  if (!['set','remove'].includes(action)) throw new Error('不支持此操作');
+  const before = parseEnv(text), stripped = removeEnvName(text, name), after = parseEnv(stripped);
+  for (const [key, old] of Object.entries(before)) if (key !== name && after[key] !== old) throw new Error('现有环境文件的格式无法安全修改，原文件未更改');
+  for (const key of Object.keys(after)) if (key !== name && !Object.hasOwn(before,key)) throw new Error('现有环境文件的格式无法安全修改，原文件未更改');
+  if (Object.hasOwn(after, name)) throw new Error('无法安全移除原有项目，原文件未更改');
+  const result = action === 'set' ? `${stripped}${stripped && !stripped.endsWith('\n')?'\n':''}${name}=${encodeEnvValue(value)}\n` : stripped;
+  if (action === 'set' && parseEnv(result)[name] !== value) throw new Error('无法保存这个值，原文件未更改');
+  return result;
+}
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -120,11 +158,19 @@ const server = http.createServer(async (req, res) => {
       const html = (await readFile(path.join(root, 'public', 'index.html'), 'utf8')).replace('__WORKBENCH_TOKEN__', token);
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'", 'x-content-type-options': 'nosniff' }); return res.end(html);
     }
-    if (req.method === 'GET' && ['/app.js','/style.css'].includes(url.pathname)) {
+    if (req.method === 'GET' && ['/app.js','/forms.js','/style.css'].includes(url.pathname)) {
       res.writeHead(200, { 'content-type': contentTypes[path.extname(url.pathname)], 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); return res.end(await readFile(path.join(root, 'public', url.pathname.slice(1))));
     }
     if (!url.pathname.startsWith('/api/') || req.headers['x-workbench-token'] !== token || (req.headers.origin && req.headers.origin !== `http://${req.headers.host}`)) return json(res, 403, { error: '请求未授权' });
     if (req.method === 'GET' && url.pathname === '/api/info') return json(res, 200, { home, app, rulesFile, node: process.execPath, cli });
+    if (req.method === 'GET' && url.pathname === '/api/models') {
+      try {
+        const codexHome = process.env.CODEX_HOME || path.join(homedir(), '.codex');
+        const cache = JSON.parse(await readFile(path.join(codexHome, 'models_cache.json'), 'utf8'));
+        const models = (Array.isArray(cache.models) ? cache.models : []).filter(m => m && m.visibility === 'list' && typeof m.slug === 'string').map(m => ({ id: m.slug, name: typeof m.display_name === 'string' ? m.display_name : m.slug, efforts: (Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels : []).map(e => e.effort).filter(e => typeof e === 'string') }));
+        return json(res, 200, { models });
+      } catch { return json(res, 200, { models: [] }); }
+    }
     if (req.method === 'GET' && url.pathname === '/api/runtime') return json(res, 200, runtimeView());
     if (req.method === 'POST' && url.pathname === '/api/runtime') {
       const { action } = await body(req);
@@ -174,8 +220,24 @@ const server = http.createServer(async (req, res) => {
       await atomicWrite(settings[name], data.text);
       return json(res, 200, { ok: true, hash: hash(data.text) });
     }
+    if (req.method === 'GET' && url.pathname === '/api/secrets') { const text=await settingsText('secrets'); return json(res,200,{ names:Object.keys(parseEnv(text)).sort(),hash:hash(text) }); }
+    if (req.method === 'POST' && url.pathname === '/api/secrets') {
+      const data=await body(req),text=await settingsText('secrets');
+      if(hash(text)!==data.hash)return json(res,409,{error:'设置已被其他程序修改，请重新打开后再试'});
+      const changed=changeEnv(text,data.name,data.action,data.value);
+      await atomicWrite(settings.secrets,changed);
+      return json(res,200,{ok:true,hash:hash(changed)});
+    }
+    if (req.method === 'POST' && url.pathname === '/api/probe') {
+      const data=await body(req); let base;
+      try { base=new URL(data.url); } catch { throw new Error('测试中台地址无效'); }
+      if(!['http:','https:'].includes(base.protocol)||!data.keys||!['source','worker','channel','owner'].every(key=>typeof data.keys[key]==='string'&&data.keys[key].trim())||!data.eventType||!data.answerer) throw new Error('请填写测试地址、全部测试密钥、事件类型和回答人');
+      const job=createJob('协议检查');
+      void (async()=>{try { const {conformance}=await import(pathToFileURL(path.join(app,'protocol','conformance.ts')).href);const result=await conformance(data.url.replace(/\/$/,''),{keys:data.keys,eventType:data.eventType,answerer:data.answerer});job.output=`检查完成：${result.checks} 项`;job.code=0; } catch(error) {job.output=error.message||String(error);job.code=1;} finally {job.done=true;}})();
+      return json(res,200,{id:job.id});
+    }
     if (req.method === 'POST' && url.pathname === '/api/action') {
-      const { kind, id, data = {} } = await body(req);
+      const { kind, id, data = {}, sourceKey } = await body(req);
       const numeric = Number.isSafeInteger(id) && id > 0;
       let endpoint;
       if (numeric && ['answer','resolve'].includes(kind)) endpoint = `/v1/cards/${id}/${kind}`;
@@ -183,7 +245,8 @@ const server = http.createServer(async (req, res) => {
       else if (typeof id === 'string' && id && ['pause','resume','run'].includes(kind)) endpoint = `/v1/rules/${encodeURIComponent(id)}/${kind}`;
       else if (kind === 'event') endpoint = '/v1/events';
       else throw new Error('不支持此操作');
-      return json(res, 200, await hub('POST', endpoint, data, kind === 'event'));
+      if(sourceKey!==undefined && (kind!=='event'||typeof sourceKey!=='string'||!sourceKey.trim()))throw new Error('来源密钥无效');
+      return json(res, 200, await hub('POST', endpoint, data, kind === 'event', sourceKey));
     }
     if (req.method === 'POST' && (url.pathname === '/api/cli' || url.pathname === '/api/jobs')) {
       const { args, input = '' } = await body(req);
