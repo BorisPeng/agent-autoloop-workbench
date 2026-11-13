@@ -42,8 +42,17 @@ async function hub(method, endpoint, data, source = false, sourceKey) {
   const response = await fetch(hubUrl(c.url, endpoint), { method, headers: { authorization: `Bearer ${key}`, ...(data !== undefined ? { 'content-type': 'application/json' } : {}) }, ...(data !== undefined ? { body: JSON.stringify(data) } : {}), signal: AbortSignal.timeout(12000) });
   const text = await response.text();
   let value; try { value = JSON.parse(text); } catch { value = { error: text || `中台返回 ${response.status}` }; }
-  if (!response.ok) throw new Error(value.error || `中台返回 ${response.status}`);
+  if (!response.ok) { const error=new Error(value.error || `中台返回 ${response.status}`); error.status=response.status; throw error; }
   return value;
+}
+async function capabilities() {
+  const {parseRules}=await import(pathToFileURL(path.join(app,'protocol','rules.ts')).href);
+  const check=change=>{const sample={sources:{local:{name:'本机'}},agents:{agent:{name:'测试',worker:'worker',use:'codex'}},channels:{desktop:{name:'桌面'}},rules:[{name:'测试',when:{source:'local',types:['test.start']},to:'agent',cwd:'~/work',prompt:'测试'}],elsewhere:[]};change(sample);try{parseRules(JSON.stringify(sample),Date.now(),'Asia/Shanghai');return true;}catch{return false;}};
+  let client='',query='',delivery='';try{client=await readFile(path.join(app,'protocol','client.ts'),'utf8');}catch{}try{query=await readFile(path.join(app,'kernel','query.ts'),'utf8');}catch{}
+  const deliveryDir=existsSync(path.join(home,'plugins','delivery','agent.ts'))?path.join(home,'plugins','delivery'):path.join(app,'plugins','delivery');
+  try{delivery=await readFile(path.join(deliveryDir,'run.ts'),'utf8');}catch{}
+  const deliveryOptions=Object.fromEntries(['auto-merge','review-policy','review-status','toolkit','progress-command','notify-command'].map(key=>[key,new RegExp(`(?:["']${key}["']|\\b${key}\\b)\\s*:`).test(delivery)]));
+  return {ruleTitle:check(x=>x.rules[0].title='task-{id}'),ruleMaxActive:check(x=>x.rules[0].maxActive=1),agentMaxActive:check(x=>x.agents.agent.maxActive=1),agentTier:check(x=>x.agents.agent.tier='priority'),defaultChannels:check(x=>x.defaultChannels=['desktop']),elsewhereModel:check(x=>x.elsewhere.push({name:'外部任务',source:'local',to:'agent',cron:'0 9 * * *',where:'外部',model:'test',effort:'high'})),zcode:existsSync(path.join(home,'plugins','zcode','agent.ts'))||existsSync(path.join(app,'plugins','zcode','agent.ts')),delivery:existsSync(path.join(deliveryDir,'agent.ts')),deliveryOptions,history:existsSync(path.join(app,'cli','runs.ts')),replay:/\breplay\s*:/.test(client),eventOutcome:/\beventOutcome\b/.test(query)};
 }
 function checkCommand(args, input) {
   if (!Array.isArray(args) || !args.length || !commands.has(args[0]) || args.some(x => typeof x !== 'string' || x.length > 10000) || typeof input !== 'string') throw new Error('命令参数无效');
@@ -159,7 +168,16 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': contentTypes[path.extname(url.pathname)], 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); return res.end(await readFile(path.join(root, 'public', url.pathname.slice(1))));
     }
     if (!url.pathname.startsWith('/api/') || req.headers['x-workbench-token'] !== token || (req.headers.origin && req.headers.origin !== `http://${req.headers.host}`)) return json(res, 403, { error: '请求未授权' });
-    if (req.method === 'GET' && url.pathname === '/api/info') return json(res, 200, { home, app, rulesFile, node: process.execPath, cli });
+    if (req.method === 'GET' && url.pathname === '/api/info') {
+      let localVersion=null,localCommit=null;try{const version=await import(pathToFileURL(path.join(app,'host','version.ts')).href);localVersion=version.versionLine(app);localCommit=version.commitOf(app);}catch{}
+      return json(res, 200, { home, app, rulesFile, node: process.execPath, cli, localVersion, localCommit });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/health') {
+      const c=await config(),response=await fetch(hubUrl(c.url,'/healthz'),{signal:AbortSignal.timeout(5000)});
+      if(!response.ok)throw new Error(`中台返回 ${response.status}`);
+      const health=await response.json();return json(res,200,{ok:health.ok===true,commit:typeof health.commit==='string'?health.commit:null});
+    }
+    if (req.method === 'GET' && url.pathname === '/api/capabilities') return json(res,200,await capabilities());
     if (req.method === 'GET' && url.pathname === '/api/models') {
       try {
         const codexHome = process.env.CODEX_HOME || path.join(homedir(), '.codex');
@@ -197,6 +215,19 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'GET' && /^\/api\/why\/\d+$/.test(url.pathname)) return json(res, 200, await hub('GET', url.pathname.replace('/api/why/', '/v1/runs/') + '/why'));
+    if (req.method === 'GET' && url.pathname === '/api/history') {
+      const before=url.searchParams.get('before'),rule=url.searchParams.get('rule')||undefined;
+      if(before&&(!/^[1-9]\d*$/.test(before)||!Number.isSafeInteger(Number(before))))throw new Error('页码无效');
+      const file=path.join(app,'cli','runs.ts');if(!existsSync(file))return json(res,404,{error:'当前程序版本没有此历史查询功能'});
+      const {findRuns}=await import(pathToFileURL(file).href);
+      const found=await findRuns(at=>hub('GET',`/v1/state${at===undefined?'':`?before=${at}`}`),{rule,before:before?Number(before):undefined});
+      return json(res,200,{runs:found.runs,before:found.more});
+    }
+    if (req.method === 'POST' && url.pathname === '/api/event-outcome') {
+      const {id,sourceKey}=await body(req);if(!Number.isSafeInteger(id)||id<=0)throw new Error('事件编号无效');
+      if(sourceKey!==undefined&&(typeof sourceKey!=='string'||!sourceKey.trim()))throw new Error('来源密钥无效');
+      return json(res,200,await hub('GET',`/v1/events/${id}`,undefined,true,sourceKey));
+    }
     if (req.method === 'GET' && url.pathname === '/api/rules') { const text = await readFile(rulesFile, 'utf8'); return json(res, 200, { text, hash: hash(text) }); }
     if (req.method === 'POST' && url.pathname === '/api/rules') {
       const data = await body(req); if (typeof data.text !== 'string') throw new Error('规则内容无效');
@@ -242,7 +273,7 @@ const server = http.createServer(async (req, res) => {
       let endpoint;
       if (numeric && ['answer','resolve'].includes(kind)) endpoint = `/v1/cards/${id}/${kind}`;
       else if (numeric && kind === 'cancel') endpoint = `/v1/runs/${id}/cancel`;
-      else if (typeof id === 'string' && id && ['pause','resume','run'].includes(kind)) endpoint = `/v1/rules/${encodeURIComponent(id)}/${kind}`;
+      else if (typeof id === 'string' && id && ['pause','resume','run','replay'].includes(kind)) endpoint = `/v1/rules/${encodeURIComponent(id)}/${kind}`;
       else if (kind === 'event') endpoint = '/v1/events';
       else throw new Error('不支持此操作');
       if(sourceKey!==undefined && (kind!=='event'||typeof sourceKey!=='string'||!sourceKey.trim()))throw new Error('来源密钥无效');
@@ -261,7 +292,7 @@ const server = http.createServer(async (req, res) => {
       return job ? json(res, 200, job) : json(res, 404, { error: '没有这个操作记录，工作台可能已重启' });
     }
     return json(res, 404, { error: '没有这个接口' });
-  } catch (error) { return json(res, error instanceof FileConflict ? 409 : 500, { error: error.message || String(error) }); }
+  } catch (error) { const status=error instanceof FileConflict?409:Number.isInteger(error.status)&&error.status>=400&&error.status<600?error.status:500;return json(res,status,{error:error.message||String(error)}); }
 });
 
 server.listen(Number(process.env.WORKBENCH_PORT || 3390), '127.0.0.1', () => console.log(`Workbench: http://127.0.0.1:${server.address().port}`));

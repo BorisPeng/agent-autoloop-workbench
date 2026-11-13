@@ -10,12 +10,29 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: stable
+            ref: 306e0873edc84a658ff1351e0f43f637edaf0e48
+            legacy: '0'
+            preview: '0'
+          - version: legacy
+            ref: 512f9fd4b1acc956727b64134585b15f1c5c7ddd
+            legacy: '1'
+            preview: '0'
+          - version: development
+            ref: 1bd9aa2549d9506053c778c6fef9f8a68b78d5bf
+            legacy: '0'
+            preview: '1'
+    name: Windows / ${{ matrix.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: KKKKhazix/agent-autoloop
-          ref: 512f9fd4b1acc956727b64134585b15f1c5c7ddd
+          ref: ${{ matrix.ref }}
           path: upstream
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -25,13 +42,18 @@ jobs:
       - run: npm test
         env:
           AGENT_AUTOLOOP_APP: ${{ github.workspace }}\upstream
-      - run: npm run build:win
-      - run: node --test tests/desktop.test.mjs
+          WORKBENCH_EXPECT_LEGACY: ${{ matrix.legacy }}
+          WORKBENCH_EXPECT_PREVIEW: ${{ matrix.preview }}
+      - if: matrix.version == 'stable'
+        run: npm run build:win
+      - if: matrix.version == 'stable'
+        run: node --test tests/desktop.test.mjs
         env:
           AGENT_AUTOLOOP_APP: ${{ github.workspace }}\upstream
           WORKBENCH_DESKTOP_EXE: ${{ github.workspace }}\dist\win-unpacked\Agent Autoloop Workbench.exe
           WORKBENCH_TEST_NO_SYSTEM_NODE: '1'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - if: matrix.version == 'stable'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: agent-autoloop-workbench-windows-x64
           path: dist/Agent-Autoloop-Workbench-Setup-*.exe

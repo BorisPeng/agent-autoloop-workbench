@@ -70,7 +70,11 @@ test('packaged desktop starts, renders, sends an event, and closes its local ser
     const scheduled=await waitFor(async()=>{const r=JSON.parse(await readFile(path.join(home,'rules.json'),'utf8'));return r.rules.find(x=>x.name==='无来源定时任务')?r:null;},'scheduled task without event source was not saved');
     assert.equal(scheduled.rules[0].when.cron,'0 9 * * *');
     await waitFor(()=>evaluate("!document.querySelector('#dialog').open"),'scheduled task form did not close');
-    await evaluate("document.querySelector('[data-page=tools]').click();document.querySelector('[data-action=event]').click();document.querySelector('[name=type]').value='demo.start';document.querySelector('[name=id]').value='desktop-test';document.querySelector('#action-form').requestSubmit()");
+    await evaluate("window.confirm=()=>true;document.querySelector('[data-page=tools]').click();document.querySelector('[data-action=edit-rules]').click()");
+    await waitFor(()=>evaluate("document.querySelector('#dialog').open && !!document.querySelector('#tree-editor')"),'agent settings did not open');
+    await evaluate(`(()=>{const a=[...document.querySelectorAll('details')].find(e=>e.dataset.treePath===JSON.stringify(['agents','a1']));a.open=true;const c=a.querySelector(':scope > .tree-body > .tree-add [data-tree-choice]');c.value='program';c.dispatchEvent(new Event('change'));a.querySelector(':scope > .tree-body > .tree-add [data-tree-add]').click()})()`);
+    assert.equal(await evaluate("!!document.querySelector('[data-tree-file]')"),true);
+    await evaluate("document.querySelector('#dialog-close').click();document.querySelector('[data-action=event]').click();document.querySelector('[name=type]').value='demo.start';document.querySelector('[name=id]').value='desktop-test';document.querySelector('#action-form').requestSubmit()");
     await waitFor(()=>requests.some(r=>r.url==='/v1/events'),'desktop event was not sent');
     const event=requests.find(r=>r.url==='/v1/events'); assert.equal(event.auth,'Bearer test-source'); assert.equal(JSON.parse(event.body).id,'desktop-test');
     assert.deepEqual(errors,[]);

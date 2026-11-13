@@ -34,7 +34,8 @@ function modelSupport(agent) {
 }
 async function showTaskForm(name='') {
   const {data,hash}=await readRulesForm();
-  const models=(await api('/api/models')).models || [];
+  const [modelData,capabilities]=await Promise.all([api('/api/models'),api('/api/capabilities').catch(()=>({}))]);
+  const models=modelData.models||[];features=capabilities;
   const original=name ? (data.rules||[]).find(r=>r.name===name) : null;
   if(name&&!original)throw new Error('没有找到这个任务，请刷新后重试');
   const agents=Object.entries(data.agents||{}), sources=Object.entries(data.sources||{}).filter(([id])=>id!=='schedule');
@@ -42,9 +43,10 @@ async function showTaskForm(name='') {
   const selectedAgent=original?.to||agents[0][0];
   const source=original?.when?.source || (data.sources?.local?'local':sources[0]?.[0]);
   const title=name?'编辑任务':'新建任务';
+  const advanced=(capabilities.ruleTitle?`${field('会话标题（可选）','session_title','例如 任务-{id}，不能含空格',original?.title||'')}<p class="footnote">可用 {id} 或 {subject} 区分事项。Codex 的提示词前还有自身说明，标题不一定是会话第一行。</p>`:'')+(capabilities.ruleMaxActive?`${field('此任务同时执行上限（可选）','max_active','留空表示不单独限制',original?.maxActive??'','number')}<p class="footnote">任务、Agent、并发组和接单程序的上限会共同生效。</p>`:'');
   const triggers=(name ? option('keep','保持当前触发方式',true) : '')+
     option('manual','手动运行',!name)+option('minutes','每隔几分钟')+option('hourly','每小时')+option('daily','每天定时')+option('weekdays','工作日定时')+option('weekly','每周定时')+option('monthly','每月定时')+option('custom','自定义时间')+option('event','收到事件时');
-  modal(title,form(`${field('任务名称','name','例如：整理本周资料',original?.name||'')}${textarea('任务描述','prompt','描述希望 Agent 完成的事情',original?.prompt||'')}${directoryField('工作目录','cwd','选择或填写任务的工作目录',original?.cwd||'')}${selectField('执行的 Agent','agent',agents.map(([id,a])=>option(id,`${a.name||id}（${id}）`,id===selectedAgent)).join(''))}<div id="task-model-fields"></div>${selectField('操作权限','task_access',option('__inherit__','使用所选 Agent 的权限',true)+option('read','只读')+option('edit','可编辑工作目录')+option('full','完全访问'))}${selectField('触发方式','trigger',triggers)}<div id="task-schedule" hidden>${selectField('间隔','interval',[1,5,10,15,20,30].map(n=>option(String(n),`${n} 分钟`,n===5)).join(''))}${field('每小时的第几分钟','hour_minute','0 到 59','0','number')}${field('时间','time','','09:00','time')}${selectField('星期','weekday',['日','一','二','三','四','五','六'].map((d,i)=>option(String(i),`星期${d}`,i===1)).join(''))}${field('每月的日期','monthday','1 到 31','1','number')}</div><div id="task-custom-schedule" hidden>${schedulePicker()}</div><div id="task-event" hidden>${selectField('事件来源','source',sources.map(([id,s])=>option(id,s.name||id,id===source)).join(''))}${field('事件类型','types','例如 feedback.new，多个类型用逗号分隔',original?.when?.types?.join(', ')||'')}</div><p class="footnote">保存后可在规则列表中手动运行。已领取的轮次保留原设置。</p>`,'保存任务'));
+  modal(title,form(`${field('任务名称','name','例如：整理本周资料',original?.name||'')}${textarea('任务描述','prompt','描述希望 Agent 完成的事情',original?.prompt||'')}${directoryField('工作目录','cwd','选择或填写任务的工作目录',original?.cwd||'')}${selectField('执行的 Agent','agent',agents.map(([id,a])=>option(id,`${a.name||id}（${id}）`,id===selectedAgent)).join(''))}<div id="task-model-fields"></div>${selectField('操作权限','task_access',option('__inherit__','使用所选 Agent 的权限',true)+option('read','只读')+option('edit','可编辑工作目录')+option('full','完全访问'))}${advanced?`<details class="tree-group"><summary>更多任务设置</summary><div class="tree-body">${advanced}</div></details>`:''}${selectField('触发方式','trigger',triggers)}<div id="task-schedule" hidden>${selectField('间隔','interval',[1,5,10,15,20,30].map(n=>option(String(n),`${n} 分钟`,n===5)).join(''))}${field('每小时的第几分钟','hour_minute','0 到 59','0','number')}${field('时间','time','','09:00','time')}${selectField('星期','weekday',['日','一','二','三','四','五','六'].map((d,i)=>option(String(i),`星期${d}`,i===1)).join(''))}${field('每月的日期','monthday','1 到 31','1','number')}</div><div id="task-custom-schedule" hidden>${schedulePicker()}</div><div id="task-event" hidden>${selectField('事件来源','source',sources.map(([id,s])=>option(id,s.name||id,id===source)).join(''))}${field('事件类型','types','例如 feedback.new，多个类型用逗号分隔',original?.when?.types?.join(', ')||'')}</div><p class="footnote">保存后可在规则列表中手动运行。已领取的轮次保留原设置。</p>`,'保存任务'));
   const formEl=$('#action-form');
   function updateAgent() {
     const id=formEl.elements.agent.value, agent=data.agents[id], support=modelSupport(agent);
@@ -53,7 +55,8 @@ async function showTaskForm(name='') {
     const currentModel=agent.model||'', known=choices.some(m=>m.id===currentModel);
     const modelOptions=option('','使用程序默认模型',!currentModel)+choices.map(m=>option(m.id,m.name,m.id===currentModel)).join('')+option('__custom__','填写其他模型',Boolean(currentModel&&!known));
     const currentEffort=agent.effort||'';
-    $('#task-model-fields').innerHTML=(support.model?selectField('模型','model',modelOptions)+`<div id="custom-model"${currentModel&&!known?'':' hidden'}>${field('其他模型 ID','model_custom','填写 Agent 支持的模型',currentModel&&!known?currentModel:'')}</div>`:'')+(support.effort?selectField('思考强度','effort',''):'')+'<p class="footnote">模型列表来自本机缓存；可用性取决于所选 Agent 和账号。</p>';
+    const tier=agent.use==='codex'&&capabilities.agentTier?selectField('服务档位','tier',option('__inherit__',`沿用 Agent 设置${agent.tier?`（${agent.tier}）`:''}`,true)+option('__default__','使用 Codex 默认')+option('priority','优先（Fast）')+option('__custom__','填写其他档位'))+`<div id="custom-tier" hidden>${field('其他服务档位','tier_custom')}</div>`:'';
+    $('#task-model-fields').innerHTML=(support.model?selectField('模型','model',modelOptions)+`<div id="custom-model"${currentModel&&!known?'':' hidden'}>${field('其他模型 ID','model_custom','填写 Agent 支持的模型',currentModel&&!known?currentModel:'')}</div>`:'')+(support.effort?selectField('思考强度','effort',''):'')+tier+'<p class="footnote">模型列表来自本机缓存；可用性取决于所选 Agent 和账号。</p>';
     function updateEfforts(preferred, preserveExisting=false) {
       const selected=choices.find(m=>m.id===formEl.elements.model?.value);
       const efforts=selected?.efforts?.length?selected.efforts:agent.use==='claude'?['low','medium','high','xhigh','max']:['low','medium','high','xhigh','max','ultra'];
@@ -64,6 +67,7 @@ async function showTaskForm(name='') {
     }
     if(support.effort)updateEfforts(currentEffort,true);
     formEl.elements.model?.addEventListener('change',()=>{const custom=$('#custom-model');if(custom)custom.hidden=formEl.elements.model.value!=='__custom__';if(support.effort)updateEfforts(formEl.elements.effort.value);});
+    formEl.elements.tier?.addEventListener('change',()=>{$('#custom-tier').hidden=formEl.elements.tier.value!=='__custom__';});
   }
   function updateTrigger() { const kind=formEl.elements.trigger.value; $('#task-schedule').hidden=!['minutes','hourly','daily','weekdays','weekly','monthly'].includes(kind);$('#task-custom-schedule').hidden=kind!=='custom'; $('#task-event').hidden=kind!=='event';formEl.elements.interval.closest('label').hidden=kind!=='minutes';formEl.elements.hour_minute.closest('label').hidden=kind!=='hourly';formEl.elements.weekday.closest('label').hidden=kind!=='weekly';formEl.elements.monthday.closest('label').hidden=kind!=='monthly';formEl.elements.time.closest('label').hidden=!['daily','weekdays','weekly','monthly'].includes(kind); }
   formEl.elements.agent.addEventListener('change',updateAgent); formEl.elements.trigger.addEventListener('change',updateTrigger);updateAgent();updateTrigger();
@@ -76,14 +80,19 @@ async function showTaskForm(name='') {
     const selectedModel=support.model?(v.model==='__custom__'?v.model_custom:v.model):undefined;
     if(v.model==='__custom__'&&!nonempty(selectedModel))throw new Error('请填写模型 ID');
     const selectedEffort=support.effort?v.effort:undefined;
+    const selectedTier=v.tier==='__inherit__'?originalAgent.tier||'':v.tier==='__default__'?'':v.tier==='__custom__'?v.tier_custom:v.tier;
+    if(v.tier==='__custom__'&&!nonempty(selectedTier))throw new Error('请填写服务档位');
     let agentId=v.agent;
     const accessChanged=v.task_access!=='__inherit__' && v.task_access!==(originalAgent.access||'edit');
-    if((support.model&&(selectedModel||'')!==(originalAgent.model||''))||(support.effort&&(selectedEffort||'')!==(originalAgent.effort||''))||accessChanged) {
+    const tierChanged=v.tier!==undefined&&(selectedTier||'')!==(originalAgent.tier||'');
+    if((support.model&&(selectedModel||'')!==(originalAgent.model||''))||(support.effort&&(selectedEffort||'')!==(originalAgent.effort||''))||accessChanged||tierChanged) {
+      if(originalAgent.maxActive&&!confirm('单独设置会创建一个独立 Agent，它的并发上限会单独计算，不再与原 Agent 共用。确定继续？'))return;
       agentId=`wb-${crypto.randomUUID().slice(0,12)}`;
       const clone={...originalAgent,name:`${originalAgent.name||v.agent} · ${v.name}`};
       if(support.model){if(nonempty(selectedModel))clone.model=selectedModel.trim();else delete clone.model;}
       if(support.effort){if(nonempty(selectedEffort))clone.effort=selectedEffort;else delete clone.effort;}
       if(accessChanged)clone.access=v.task_access;
+      if(tierChanged){if(nonempty(selectedTier))clone.tier=selectedTier.trim();else delete clone.tier;}
       data.agents[agentId]=clone;
     }
     let when=original?.when;
@@ -100,25 +109,27 @@ async function showTaskForm(name='') {
     }
     if(!when)throw new Error('请选择触发方式');
     const task={...(original||{}),name:v.name.trim(),when,to:agentId,cwd:v.cwd.trim()};
+    if(capabilities.ruleTitle){if(nonempty(v.session_title))task.title=v.session_title.trim();else delete task.title;}
+    if(capabilities.ruleMaxActive){if(v.max_active){if(!/^[1-9]\d*$/.test(v.max_active))throw new Error('同时执行上限需要是正整数');task.maxActive=Number(v.max_active);}else delete task.maxActive;}
     if(nonempty(v.prompt))task.prompt=v.prompt;else delete task.prompt;
     if(original){const index=data.rules.findIndex(r=>r.name===name);data.rules[index]=task;}else (data.rules ||= []).push(task);
     await writeRulesForm(data,hash); rulesDirty=false; closeModal(); page='rules'; toast('任务已保存'); await refresh(true);
   });
 }
 
-const formLabels={timezone:'时区',askFirst:'需要先征求意见的事项',sources:'事件来源',agents:'Agent',channels:'通知通道',rules:'任务规则',elsewhere:'外部定时任务',name:'名称',adapter:'来源插件',worker:'接单程序',use:'接入方式',model:'模型',effort:'思考强度',access:'操作权限',command:'命令参数',program:'程序路径',timeout:'超时分钟数',answerers:'允许回答的人',links:'使用回答链接',when:'触发条件',source:'事件来源',types:'事件类型',cron:'定时表达式',to:'执行的 Agent',cwd:'工作目录',skill:'任务手册',prompt:'任务描述',group:'并发组',parallel:'并发数量',resume:'接续会话',tell:'通知方式',emits:'允许发出的事件',where:'运行位置',url:'中台地址',hub:'中台',listen:'监听地址',publicUrl:'对外地址',capacity:'接单容量',unreachable:'不可连接的通道',owner:'本人密钥',key:'密钥',user:'接收用户',lark:'飞书程序',platform:'平台',body:'消息内容',text:'文本',headers:'请求头'};
+const formLabels={timezone:'时区',askFirst:'需要先征求意见的事项',sources:'事件来源',agents:'Agent',channels:'通知通道',defaultChannels:'默认通知通道',rules:'任务规则',elsewhere:'外部定时任务',name:'名称',adapter:'来源插件',worker:'接单程序',use:'接入方式',model:'模型',effort:'思考强度',tier:'服务档位',title:'会话标题',maxActive:'同时执行上限',access:'操作权限',command:'命令参数',program:'程序路径',timeout:'超时分钟数',answerers:'允许回答的人',links:'使用回答链接',when:'触发条件',source:'事件来源',types:'事件类型',cron:'定时表达式',to:'执行的 Agent',cwd:'工作目录',skill:'任务手册',prompt:'任务描述',group:'并发组',parallel:'并发数量',resume:'接续会话',tell:'通知方式',emits:'允许发出的事件',where:'运行位置',url:'中台地址',hub:'中台',listen:'监听地址',publicUrl:'对外地址',capacity:'接单容量',unreachable:'不可连接的通道',owner:'本人密钥',key:'密钥',user:'接收用户',lark:'飞书程序',platform:'平台',body:'消息内容',text:'文本',headers:'请求头'};
 const enums={access:[['read','只读'],['edit','可编辑工作目录'],['full','完全访问']],tell:[['needed','仅需要时通知'],['always','每轮通知'],['never','不发送普通通知']],effort:[['low','低'],['medium','中'],['high','高'],['xhigh','很高'],['max','最大'],['ultra','极高']]};
 const typeLabels={string:'文字',number:'数字',boolean:'是或否',object:'一组设置',array:'列表',null:'空值'};
 const shape=(value)=>value===null?'null':Array.isArray(value)?'array':typeof value;
 const defaultShape=(type)=>({string:'',number:1,boolean:false,object:{},array:[],null:null}[type]);
 function knownFields(kind,path,value) {
   const root=path[0], last=path.at(-1), inRecord=path.length===2;
-  if(kind==='rules'&&path.length===0)return {timezone:'string',askFirst:'array',sources:'object',agents:'object',channels:'object',rules:'array',elsewhere:'array'};
-  if(kind==='rules'&&root==='agents'&&inRecord)return {name:'string',worker:'string',use:'string',model:'string',effort:'string',access:'string',command:'array',program:'string',timeout:'number'};
+  if(kind==='rules'&&path.length===0)return {timezone:'string',askFirst:'array',sources:'object',agents:'object',channels:'object',...(features.defaultChannels?{defaultChannels:'array'}:{}),rules:'array',elsewhere:'array'};
+  if(kind==='rules'&&root==='agents'&&inRecord)return {name:'string',worker:'string',use:'string',model:'string',effort:'string',...(features.agentTier?{tier:'string'}:{}),...(features.agentMaxActive?{maxActive:'number'}:{}),access:'string',command:'array',program:'string',timeout:'number'};
   if(kind==='rules'&&root==='sources'&&inRecord)return {name:'string',adapter:'string'};
   if(kind==='rules'&&root==='channels'&&inRecord)return {name:'string',answerers:'array',links:'boolean'};
-  if(kind==='rules'&&root==='rules'&&inRecord)return {name:'string',when:'object',to:'string',cwd:'string',skill:'string',prompt:'string',group:'string',parallel:'number',resume:'boolean',tell:'string',emits:'object',channels:'array'};
-  if(kind==='rules'&&root==='elsewhere'&&inRecord)return {name:'string',source:'string',to:'string',cron:'string',where:'string',cwd:'string',skill:'string',prompt:'string'};
+  if(kind==='rules'&&root==='rules'&&inRecord)return {name:'string',when:'object',to:'string',cwd:'string',skill:'string',prompt:'string',...(features.ruleTitle?{title:'string'}:{}),group:'string',parallel:'number',...(features.ruleMaxActive?{maxActive:'number'}:{}),resume:'boolean',tell:'string',emits:'object',channels:'array'};
+  if(kind==='rules'&&root==='elsewhere'&&inRecord)return {name:'string',source:'string',to:'string',cron:'string',where:'string',...(features.elsewhereModel?{model:'string',effort:'string'}:{}),cwd:'string',skill:'string',prompt:'string'};
   if(kind==='rules'&&['when','emits'].includes(last))return {source:'string',types:'array',cron:'string'};
   if(kind==='config'&&path.length===0)return {url:'string',hub:'object',worker:'object',channels:'object',source:'object',owner:'string'};
   if(kind==='config'&&last==='hub')return {listen:'string',publicUrl:'string'};
@@ -158,11 +169,14 @@ function showTreeEditor(kind,data,hash,section='') {
     let input;
     if(type==='boolean')input=`<select data-tree-value="${id}" data-type="boolean">${option('true','是',value)}${option('false','否',!value)}</select>`;
     else if(type==='null')input='<span class="footnote">空值；可删除后添加其他类型。</span>';
+    else if(type==='string'&&kind==='rules'&&Array.isArray(get(path.slice(0,-1)))&&(path[0]==='defaultChannels'||(path[0]==='rules'&&path.at(-2)==='channels'))) {const choices=Object.entries(data.channels||{});input=`<select data-tree-value="${id}" data-type="string">${!choices.some(([v])=>v===value)?option(value,value||'请选择',true):''}${choices.map(([v,o])=>option(v,o.name||v,v===value)).join('')}</select>`;}
     else if(type==='string'&&kind==='rules'&&key==='cron')input=`<div><span class="footnote">${value?'已设置周期':'尚未设置周期'}</span> <button type="button" class="button" data-tree-schedule="${id}">选择时间</button><div data-tree-schedule-pane="${id}" hidden>${schedulePicker()}<button type="button" class="button" data-tree-schedule-apply="${id}">应用时间</button></div></div>`;
     else if(type==='string'&&kind==='rules'&&['to','source'].includes(key)) {const choices=Object.entries(key==='to'?(data.agents||{}):(data.sources||{}));input=`<select data-tree-value="${id}" data-type="string">${!choices.some(([v])=>v===value)?option(value,value||'请选择',true):''}${choices.map(([v,o])=>option(v,o.name||v,v===value)).join('')}</select>`;}
     else if(type==='string'&&enums[key]) { const choices=enums[key];input=`<select data-tree-value="${id}" data-type="string">${choices.map(([v,l])=>option(v,l,v===value)).join('')}${!choices.some(([v])=>v===value)?option(value,value||'请选择',true):''}</select>`; }
-    else if(type==='string'&&key==='use') {const choices=[['codex','Codex'],['claude','Claude Code'],['dsh','DeepSeek Harness'],['acp','ACP'],['command','自定义命令'],['desktop','桌面通知'],['feishu','飞书'],['webhook','Webhook']];input=`<input list="tree-use-${id}" data-tree-value="${id}" data-type="string" value="${esc(value)}"><datalist id="tree-use-${id}">${choices.map(([v,l])=>option(v,l)).join('')}</datalist>`;}
+    else if(type==='string'&&key==='use') {const choices=[['codex','Codex'],['claude','Claude Code'],['dsh','DeepSeek Harness'],...(features.zcode?[['zcode','ZCode']]:[]),['acp','ACP'],['command','自定义命令'],['desktop','桌面通知'],['feishu','飞书'],['webhook','Webhook']];input=`<input list="tree-use-${id}" data-tree-value="${id}" data-type="string" value="${esc(value)}"><datalist id="tree-use-${id}">${choices.map(([v,l])=>option(v,l)).join('')}</datalist>`;}
+    else if(type==='string'&&key==='tier')input=`<input list="tree-tier-${id}" data-tree-value="${id}" data-type="string" value="${esc(value)}"><datalist id="tree-tier-${id}">${option('priority','优先（Fast）')}</datalist>`;
     else if(type==='string'&&key==='cwd'&&window.workbench?.chooseDirectory)input=`<div class="copy-row"><input data-tree-value="${id}" data-type="string" value="${esc(value)}"><button type="button" class="button" data-tree-directory="${id}">选择文件夹</button></div>`;
+    else if(type==='string'&&key==='program'&&window.workbench?.chooseFile)input=`<div class="copy-row"><input data-tree-value="${id}" data-type="string" value="${esc(value)}"><button type="button" class="button" data-tree-file="${id}">选择文件</button></div>`;
     else if(type==='string'&&sensitive)input=`<div class="copy-row"><input type="password" data-tree-value="${id}" data-type="string" value="${esc(value)}"><button type="button" class="button" data-tree-reveal="${id}">显示</button></div>`;
     else if(type==='string'&&(key==='prompt'||key==='text'||String(value).includes('\n')))input=`<textarea rows="3" data-tree-value="${id}" data-type="string">${esc(value)}</textarea>`;
     else input=`<input type="${type==='number'?'number':/key|secret|token|password/i.test(key)?'password':'text'}" data-tree-value="${id}" data-type="${esc(type)}" value="${esc(value)}">`;
@@ -186,6 +200,7 @@ function showTreeEditor(kind,data,hash,section='') {
   container.addEventListener('click',async e=>{
     const reveal=e.target.closest('[data-tree-reveal]');if(reveal){const input=container.querySelector(`[data-tree-value="${reveal.dataset.treeReveal}"]`);if(input){input.type=input.type==='password'?'text':'password';reveal.textContent=input.type==='password'?'显示':'隐藏';}return;}
     const directory=e.target.closest('[data-tree-directory]');if(directory){try{const value=await window.workbench.chooseDirectory();if(value){const input=container.querySelector(`[data-tree-value="${directory.dataset.treeDirectory}"]`);if(input){input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));}}}catch(error){toast(error.message);}return;}
+    const file=e.target.closest('[data-tree-file]');if(file){try{const value=await window.workbench.chooseFile();if(value){const input=container.querySelector(`[data-tree-value="${file.dataset.treeFile}"]`);if(input){input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));}}}catch(error){toast(error.message);}return;}
     const schedule=e.target.closest('[data-tree-schedule]');if(schedule){const pane=container.querySelector(`[data-tree-schedule-pane="${schedule.dataset.treeSchedule}"]`);pane.hidden=!pane.hidden;return;}
     const apply=e.target.closest('[data-tree-schedule-apply]');if(apply){const id=Number(apply.dataset.treeScheduleApply),path=refs[id],pane=container.querySelector(`[data-tree-schedule-pane="${id}"]`);try{get(path.slice(0,-1))[path.at(-1)]=scheduleValue(pane);pane.hidden=true;rulesDirty=true;toast('已选择时间，保存设置后生效');}catch(error){toast(error.message);}return;}
     const remove=e.target.closest('[data-tree-remove]');
@@ -206,8 +221,49 @@ function showTreeEditor(kind,data,hash,section='') {
   });
   renderTree();if(section){const group=[...container.querySelectorAll('details')].find(item=>item.dataset.treePath===JSON.stringify([section]));if(group)group.open=true;}
 }
-async function showRulesSettings(section='') { const {data,hash}=await readRulesForm();showTreeEditor('rules',data,hash,section); }
+async function showRulesSettings(section='') { const [{data,hash},caps]=await Promise.all([readRulesForm(),api('/api/capabilities').catch(()=>({}))]);features=caps;showTreeEditor('rules',data,hash,section); }
 async function showConnectionSettings() { const r=await api('/api/settings/config');let data;try{data=JSON.parse(r.text);}catch{throw new Error('现有连接设置无法读取，请从备份恢复。');}showTreeEditor('config',data,r.hash); }
+function parseDeliveryArgs(command,supported) {
+  const args=Array.isArray(command)?command:[],values={},extras=[];
+  if(args.includes('--'))throw new Error('已有交付选项使用了参数分隔符，请使用 Agent 设置逐项调整');
+  for(let i=1;i<args.length;i++) {
+    const item=args[i],match=/^--([^=]+)(?:=(.*))?$/.exec(item);
+    if(!match||!supported[match[1]]){extras.push(item);continue;}
+    if(match[1]==='auto-merge'){if(match[2]!==undefined)throw new Error('已有交付选项无法安全编辑，请使用 Agent 设置逐项调整');values[match[1]]=true;continue;}
+    const value=match[2]!==undefined?match[2]:args[++i];if(!value||value.startsWith('--'))throw new Error('已有交付选项缺少参数，请使用 Agent 设置逐项调整');values[match[1]]=value;
+  }
+  return {repo:args[0]||'',values,extras};
+}
+async function showDeliveryAgent() {
+  const [{data,hash},caps]=await Promise.all([readRulesForm(),api('/api/capabilities')]);features=caps;
+  if(!caps.delivery)throw new Error('当前程序没有交付插件');
+  const existing=Object.entries(data.agents||{}).filter(([,agent])=>agent.use==='delivery');
+  const workers=[...new Set(Object.values(data.agents||{}).map(agent=>agent.worker).filter(Boolean))];
+  const options=option('','新建交付 Agent',true)+existing.map(([id,agent])=>option(id,agent.name||id)).join('');
+  modal('交付 Agent 设置',form(`${selectField('选择','delivery_existing',options)}<div id="delivery-fields"></div><p class="footnote">共享策略从所选仓库的 main 读取。此处只配置接单程序；项目仍需在可信的 main 中准备交付设置。</p>`,'保存'));
+  const formEl=$('#action-form'),supported=caps.deliveryOptions||{};
+  function redraw() {
+    const id=formEl.elements.delivery_existing.value,agent=id?data.agents[id]:null,parsed=parseDeliveryArgs(agent?.command,supported),v=parsed.values;
+    const more=(supported['review-policy']?field('共享审查策略（可选）','policy','例如 owner/策略仓库:ops/review-policy.json',v['review-policy']||''):'')+(supported['review-status']?field('审查状态名称（可选）','review_status','留空使用项目设置',v['review-status']||''):'')+(supported.toolkit?field('工具仓库（可选）','toolkit','例如 owner/repository',v.toolkit||''):'')+(supported['progress-command']?fileField('进度程序（可选）','progress','选择可执行程序',v['progress-command']||''):'')+(supported['notify-command']?fileField('通知程序（可选）','notify','选择可执行程序',v['notify-command']||''):'')+(supported['auto-merge']?`<label class="form-field"><span><input type="checkbox" name="auto_merge" value="yes" ${v['auto-merge']?'checked':''}> 检查和审查通过后开启自动合并</span></label>`:'');
+    $('#delivery-fields').innerHTML=`${field('名称','name','例如：项目交付',agent?.name||'')}${field('GitHub 仓库','repo','例如 owner/repository',parsed.repo)}<label class="form-field">接单程序<input name="worker" list="delivery-workers" placeholder="选择或填写接单程序" value="${esc(agent?.worker||workers[0]||'')}"><datalist id="delivery-workers">${workers.map(w=>option(w,w)).join('')}</datalist></label>${field('超时分钟数（可选）','timeout','留空使用默认',agent?.timeout??'','number')}${caps.agentMaxActive?field('此 Agent 同时执行上限（可选）','max_active','留空不单独限制',agent?.maxActive??'','number'):''}${more}${parsed.extras.length?'<p class="footnote">其他已有交付选项将保留。</p>':''}`;
+  }
+  formEl.elements.delivery_existing.addEventListener('change',()=>{try{redraw();}catch(error){toast(error.message);}});redraw();formEl.addEventListener('input',()=>rulesDirty=true);
+  bindForm(async v=>{
+    const existingId=v.delivery_existing,original=existingId?data.agents[existingId]:null,parsed=parseDeliveryArgs(original?.command,supported);
+    if(!nonempty(v.name)||!nonempty(v.worker)||!/^[\w.-]+\/[\w.-]+$/.test(v.repo||''))throw new Error('请填写名称、接单程序和有效的 GitHub 仓库');
+    if(v.timeout&&!/^[1-9]\d*$/.test(v.timeout))throw new Error('超时分钟数需要是正整数');
+    if(v.max_active&&!/^[1-9]\d*$/.test(v.max_active))throw new Error('同时执行上限需要是正整数');
+    if(v.policy){const [repo,policyPath,...rest]=v.policy.split(':');if(rest.length||!/^[\w.-]+\/[\w.-]+$/.test(repo)||!policyPath||policyPath.split('/').some(p=>!p||p==='.'||p==='..'))throw new Error('共享策略请填写仓库和路径，例如 owner/repository:ops/review-policy.json');}
+    if(v.toolkit&&!/^[\w.-]+\/[\w.-]+$/.test(v.toolkit))throw new Error('工具仓库请填写 owner/repository');
+    const command=[v.repo,...parsed.extras];
+    for(const [name,value] of [['review-policy',v.policy],['review-status',v.review_status],['toolkit',v.toolkit],['progress-command',v.progress],['notify-command',v.notify]])if(supported[name]&&nonempty(value))command.push(`--${name}`,value.trim());
+    if(supported['auto-merge']&&v.auto_merge)command.push('--auto-merge');
+    const id=existingId||`delivery-${crypto.randomUUID().slice(0,8)}`,agent={...(original||{}),name:v.name.trim(),worker:v.worker.trim(),use:'delivery',command};
+    if(v.timeout)agent.timeout=Number(v.timeout);else delete agent.timeout;
+    if(caps.agentMaxActive){if(v.max_active)agent.maxActive=Number(v.max_active);else delete agent.maxActive;}
+    data.agents[id]=agent;await writeRulesForm(data,hash);rulesDirty=false;closeModal();toast('交付 Agent 已保存');await refresh(true);
+  });
+}
 async function showSecrets() {
   const result=await api('/api/secrets');
   modal('密钥与环境变量',`<p class="footnote">更改后需要重启中台；其他内容和注释会保留。</p>${result.names.length?result.names.map(name=>`<div class="row"><div class="row-main"><div class="row-title">${esc(name)}</div></div>${btn('查看','secret-view',name)}${btn('替换','secret-edit',name)}${btn('删除','secret-remove',name,'danger')}</div>`).join(''):empty('还没有环境变量') }<div class="actions">${btn('添加','secret-edit','','primary')}</div>`);

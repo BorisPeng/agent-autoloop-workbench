@@ -60,7 +60,9 @@ test('real hub routes a workbench event, receives an answer and completes the fo
     const rulesPath = path.join(home, 'rules.json');
     const rules = JSON.parse(await readFile(rulesPath, 'utf8'));
     rules.agents.agent.command = [process.execPath, agent, '{prompt}', '{model}', '{effort}'];
-    rules.agents['codex-sample']={name:'测试 Codex',worker:rules.agents.agent.worker,use:'codex'};
+    const modern=existsSync(path.join(app,'cli','runs.ts'));
+    rules.agents['codex-sample']={name:'测试 Codex',worker:rules.agents.agent.worker,use:'codex',...(modern?{maxActive:2,tier:'priority'}:{})};
+    if(process.env.WORKBENCH_EXPECT_PREVIEW==='1')rules.elsewhere.push({name:'外部测试',source:'local',to:'agent',cron:'0 9 * * *',where:'外部应用',model:'外部模型',effort:'high'});
     await writeFile(rulesPath, JSON.stringify(rules));
     const codexHome=path.join(home,'codex-cache');await mkdir(codexHome);
     await writeFile(path.join(codexHome,'models_cache.json'),JSON.stringify({models:[{slug:'model-a',display_name:'模型 A',visibility:'list',supported_reasoning_levels:[{effort:'medium'},{effort:'high'}]}]}));env.CODEX_HOME=codexHome;
@@ -72,7 +74,7 @@ test('real hub routes a workbench event, receives an answer and completes the fo
     browser=await openBrowser(base,path.join(home,'browser-profile'));
     if(browser) {
       await waitFor(()=>browser.evaluate("document.querySelector('#side-status')?.textContent==='中台未连接'"),'offline dashboard did not load');
-      await browser.evaluate("window.confirm=()=>true;document.querySelector('[data-page=tools]').click();document.querySelector('[data-action=runtime]').click()");
+      await browser.evaluate("window.__confirmations=[];window.confirm=m=>(window.__confirmations.push(m),true);document.querySelector('[data-page=tools]').click();document.querySelector('[data-action=runtime]').click()");
       await waitFor(()=>browser.evaluate("!!document.querySelector('[data-action=runtime-start]')"),'runtime controls did not open');
       await browser.evaluate("document.querySelector('[data-action=runtime-start]').click()");
     } else assert.equal((await runtime('start')).status,200);
@@ -87,6 +89,11 @@ test('real hub routes a workbench event, receives an answer and completes the fo
     if(browser) {
       await browser.evaluate("document.querySelector('#dialog-close').click();document.querySelector('#refresh').click()");
       await waitFor(()=>browser.evaluate("document.querySelector('#side-status')?.textContent==='中台已连接'"),'browser did not load the dashboard');
+      if(process.env.WORKBENCH_EXPECT_PREVIEW==='1'){
+        await browser.evaluate("document.querySelector('[data-page=overview]').click()");
+        assert.equal(await browser.evaluate("document.querySelector('#view').textContent.includes('其中缓存读取')"),true);
+        await browser.evaluate("document.querySelector('[data-page=rules]').click()");assert.equal(await browser.evaluate("document.querySelector('#view').textContent.includes('外部模型 / high')"),true);
+      }
       await browser.evaluate("document.querySelector('#primary').click()");
       await waitFor(()=>browser.evaluate("!!document.querySelector('[name=agent]')"),'task form did not open');
       if(process.env.WORKBENCH_SCREENSHOT)await browser.screenshot(process.env.WORKBENCH_SCREENSHOT);
@@ -108,12 +115,25 @@ test('real hub routes a workbench event, receives an answer and completes the fo
       await waitFor(()=>browser.evaluate("document.querySelector('#dialog').open && document.querySelector('#dialog-title').textContent==='新建任务'"),'second task form did not open');
       await browser.evaluate(`document.querySelector('[name=name]').value='模型选择任务';document.querySelector('[name=prompt]').value='完成测试';document.querySelector('[name=cwd]').value=${JSON.stringify(home)};document.querySelector('[name=agent]').value='codex-sample';document.querySelector('[name=agent]').dispatchEvent(new Event('change'));document.querySelector('[name=model]').value='model-a';document.querySelector('[name=model]').dispatchEvent(new Event('change'));`);
       assert.equal(await browser.evaluate("[...document.querySelector('[name=effort]').options].some(o=>o.value==='ultra')"),false);
+      if(modern)await browser.evaluate("document.querySelector('[name=tier]').value='__default__';document.querySelector('[name=session_title]').value='task-{id}';document.querySelector('[name=max_active]').value='1'");
       await browser.evaluate("document.querySelector('[name=effort]').value='high';document.querySelector('[name=task_access]').value='read';document.querySelector('[name=trigger]').value='custom';document.querySelector('[name=trigger]').dispatchEvent(new Event('change'));for(const [k,v] of [['minute','15'],['hour','9'],['day','1'],['month','1'],['weekday','1'],['weekday','3'],['weekday','5']])document.querySelector(`[data-schedule=\"${k}\"][value=\"${v}\"]`).checked=true;document.querySelector('[data-schedule-relation]').value='both';document.querySelector('#action-form').requestSubmit()");
       const modelRules=await waitFor(async()=>{const r=JSON.parse(await readFile(rulesPath,'utf8'));return r.rules.find(x=>x.name==='模型选择任务')?r:null;},'model choice did not save');
       const modelTask=modelRules.rules.find(x=>x.name==='模型选择任务');assert.equal(modelRules.agents[modelTask.to].model,'model-a');assert.equal(modelRules.agents[modelTask.to].effort,'high');assert.equal(modelRules.agents[modelTask.to].access,'read');assert.equal(modelRules.agents['codex-sample'].model,undefined);assert.equal(modelTask.when.cron,'15 9 */999 1 1,3,5');
+      if(modern){assert.equal(modelTask.title,'task-{id}');assert.equal(modelTask.maxActive,1);assert.equal(modelRules.agents[modelTask.to].tier,undefined);assert.equal(modelRules.agents[modelTask.to].maxActive,2);assert.equal(modelRules.agents['codex-sample'].tier,'priority');assert.equal(await browser.evaluate("window.__confirmations.some(x=>x.includes('并发上限会单独计算'))"),true);}
       await waitFor(()=>browser.evaluate("!document.querySelector('#dialog').open"),'second task form did not close');
+      if(modern){
+        await browser.evaluate("document.querySelector('[data-page=connections]').click();document.querySelector('[data-action=delivery-agent]').click()");
+        await waitFor(()=>browser.evaluate("document.querySelector('#dialog').open && document.querySelector('#dialog-title').textContent==='交付 Agent 设置'"),'delivery form did not open');
+        const parsed=await browser.evaluate("parseDeliveryArgs(['owner/repo','--future','value','--review-policy','owner/policy:ops/review-policy.json'],{'review-policy':true})");assert.deepEqual(parsed.extras,['--future','value']);
+        assert.equal(await browser.evaluate("(()=>{try{parseDeliveryArgs(['owner/repo','--','--review-policy','x'],{'review-policy':true});return false}catch{return true}})()"),true);
+        await browser.evaluate("document.querySelector('[name=name]').value='测试交付';document.querySelector('[name=repo]').value='owner/repo';document.querySelector('[name=policy]').value='owner/policy:ops/review-policy.json';document.querySelector('[name=review_status]').value='review-check';document.querySelector('[name=toolkit]').value='owner/toolkit';document.querySelector('[name=auto_merge]').checked=true;document.querySelector('#action-form').requestSubmit()");
+        const deliveryRules=await waitFor(async()=>{const r=JSON.parse(await readFile(rulesPath,'utf8'));return Object.values(r.agents).some(a=>a.name==='测试交付')?r:null;},'delivery settings did not save');
+        const delivery=Object.values(deliveryRules.agents).find(a=>a.name==='测试交付');assert.equal(delivery.use,'delivery');assert.ok(delivery.command.includes('--review-policy'));assert.ok(delivery.command.includes('owner/policy:ops/review-policy.json'));assert.ok(delivery.command.includes('--toolkit'));assert.ok(delivery.command.includes('owner/toolkit'));assert.ok(delivery.command.includes('--auto-merge'));
+        await waitFor(()=>browser.evaluate("!document.querySelector('#dialog').open"),'delivery form did not close');
+      }
       await browser.evaluate("document.querySelector('[data-page=connections]').click();document.querySelector('[data-action=rules-section][data-id=agents]').click()");
       await waitFor(()=>browser.evaluate("document.querySelector('#dialog').open && !!document.querySelector('#tree-editor')"),'agent settings did not open');
+      if(modern)assert.equal(await browser.evaluate("[...document.querySelectorAll('#tree-editor datalist option')].some(o=>o.value==='zcode')"),true);
       await browser.evaluate(`(()=>{const g=[...document.querySelectorAll('details')].find(e=>e.dataset.treePath===JSON.stringify(['agents','codex-sample']));g.open=true;const c=g.querySelector(':scope > .tree-body > .tree-add [data-tree-choice]');c.value='model';c.dispatchEvent(new Event('change'));g.querySelector(':scope > .tree-body > .tree-add [data-tree-add]').click();})()`);
       await browser.evaluate(`(()=>{const g=[...document.querySelectorAll('details')].find(e=>e.dataset.treePath===JSON.stringify(['agents','codex-sample']));const f=[...g.querySelectorAll('.tree-field label')].find(e=>e.querySelector('span').textContent==='模型');const i=f.querySelector('input');i.value='model-b';i.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#tree-save').click()})()`);
       const agentRules=await waitFor(async()=>{const r=JSON.parse(await readFile(rulesPath,'utf8'));return r.agents['codex-sample'].model==='model-b'?r:null;},'agent settings did not save');
@@ -126,6 +146,13 @@ test('real hub routes a workbench event, receives an answer and completes the fo
       const scheduleRules=await waitFor(async()=>{const r=JSON.parse(await readFile(rulesPath,'utf8'));return r.rules.find(x=>x.name==='模型选择任务')?.when.cron==='0 0 1 1 *'?r:null;},'schedule picker did not save');
       assert.equal(scheduleRules.agents[modelTask.to].model,'model-a');
       await waitFor(()=>browser.evaluate("!document.querySelector('#dialog').open"),'rule settings did not close');
+      if(modern){
+        await browser.evaluate("document.querySelector('[data-action=edit-rules]').click()");
+        await waitFor(()=>browser.evaluate("document.querySelector('#dialog').open && !!document.querySelector('#tree-editor')"),'default channel settings did not open');
+        await browser.evaluate(`(()=>{let root=[...document.querySelectorAll('details')].find(e=>e.dataset.treePath==='[]');let c=root.querySelector(':scope > .tree-body > .tree-add [data-tree-choice]');c.value='defaultChannels';c.dispatchEvent(new Event('change'));root.querySelector(':scope > .tree-body > .tree-add [data-tree-add]').click();let g=[...document.querySelectorAll('details')].find(e=>e.dataset.treePath===JSON.stringify(['defaultChannels']));g.open=true;g.querySelector(':scope > .tree-body > .tree-add [data-tree-add]').click();g=[...document.querySelectorAll('details')].find(e=>e.dataset.treePath===JSON.stringify(['defaultChannels']));let s=g.querySelector('[data-tree-value]');s.value='desktop';s.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#tree-save').click()})()`);
+        const defaults=await waitFor(async()=>{const r=JSON.parse(await readFile(rulesPath,'utf8'));return r.defaultChannels?.[0]==='desktop'?r:null;},'default channel was not saved');assert.deepEqual(defaults.defaultChannels,['desktop']);
+        await waitFor(()=>browser.evaluate("!document.querySelector('#dialog').open"),'default channel settings did not close');
+      }
       await browser.evaluate("document.querySelector('[data-page=cards]').click()");
     }
     const streamAbort = new AbortController();
@@ -146,15 +173,35 @@ test('real hub routes a workbench event, receives an answer and completes the fo
     assert.match(done.result, /已根据回答完成/);
     const snapshot = await state(); assert.ok(snapshot.runs.length >= 2);
     const why = await fetch(`${base}/api/why/${snapshot.runs[0].id}`, { headers }); assert.equal(why.status, 200);
-    await post({kind:'pause',id:'试一下',data:{reason:'隔离测试'}});
+    const pause=await post({kind:'pause',id:'试一下',data:{reason:'隔离测试'}});
     const skipped=await post({kind:'event',data:{id:'real-loop-paused',type:'try.start',subject:'#2'}});
     assert.deepEqual(skipped.routed,[]); assert.deepEqual(skipped.paused,['试一下']);
-    await post({kind:'resume',id:'试一下',data:{}});
+    if(modern){const outcome=await (await fetch(`${base}/api/event-outcome`,{method:'POST',headers,body:JSON.stringify({id:skipped.event})})).json();assert.equal(outcome.event,skipped.event);assert.deepEqual(outcome.runs,[]);if(browser){await browser.evaluate("document.querySelector('[data-page=tools]').click();document.querySelector('[data-action=event-lookup]').click()");await waitFor(()=>browser.evaluate("document.querySelector('#dialog').open && document.querySelector('#dialog-title').textContent==='查询事件进展'"),'event lookup form did not open');await browser.evaluate(`document.querySelector('[name=event_id]').value='${skipped.event}';document.querySelector('#action-form').requestSubmit()`);await waitFor(()=>browser.evaluate("document.querySelector('#dialog-title').textContent==='事件进展'"),'event outcome did not display');assert.equal(await browser.evaluate("document.querySelector('#dialog-body').textContent.includes('试一下')"),true);await browser.evaluate("document.querySelector('#dialog-close').click()");}}
+    if(modern&&browser){
+      await browser.evaluate("document.querySelector('[data-page=rules]').click()");
+      await waitFor(()=>browser.evaluate("!!document.querySelector('[data-action=pause-details][data-id=\"试一下\"]')"),'skipped-event count did not appear');
+      await browser.evaluate("document.querySelector('[data-action=resume][data-id=\"试一下\"]').click()");
+      await waitFor(()=>browser.evaluate("document.querySelector('#dialog').open && document.querySelector('#dialog-title').textContent==='规则已恢复'"),'resume did not show skipped events');
+      if(process.env.WORKBENCH_SKIPPED_SCREENSHOT)await browser.screenshot(process.env.WORKBENCH_SKIPPED_SCREENSHOT);
+      const beforeReplay=await (await fetch(`${base}/api/event-outcome`,{method:'POST',headers,body:JSON.stringify({id:skipped.event})})).json();assert.deepEqual(beforeReplay.runs,[]);
+      await browser.evaluate("document.querySelector('[data-action=replay-resumed]').click()");
+      await waitFor(()=>browser.evaluate("document.querySelector('#dialog-title').textContent==='补跑暂停事件'"),'replay form did not open');
+      await browser.evaluate("document.querySelector('#action-form').requestSubmit()");
+      await waitFor(()=>browser.evaluate("document.querySelector('#dialog-title').textContent==='补跑结果'"),'replay did not finish');
+      await browser.evaluate("document.querySelector('#dialog-close').click()");
+    } else {const resumed=await post({kind:'resume',id:'试一下',data:{}});if(modern){assert.equal(resumed.paused.skipped.count,1);await post({kind:'replay',id:'试一下',data:{since:resumed.paused.since}});}}
+    if(modern){
+      const afterReplay=await (await fetch(`${base}/api/event-outcome`,{method:'POST',headers,body:JSON.stringify({id:skipped.event})})).json();assert.equal(afterReplay.runs.length,1);
+      const again=await post({kind:'replay',id:'试一下',data:{since:pause.paused.since}});assert.deepEqual(again.events,[]);
+      const replayCard=await waitFor(async()=> (await state()).cards.find(c=>c.title==='选择颜色' && c.id!==card.id),'replay did not create a card');
+      await post({kind:'resolve',id:replayCard.id,data:{reason:'无需决定'}});await waitFor(async()=> (await state()).recentCards.find(c=>c.id===replayCard.id&&c.state==='closed'),'replay card did not close');
+    }
     await post({kind:'run',id:'试一下',data:{reason:'隔离测试'}});
     const another=await waitFor(async()=> (await state()).cards.find(c=>c.title==='选择颜色' && c.id!==card.id),'manual run did not create a second card');
     await post({kind:'resolve',id:another.id,data:{reason:'无需决定'}});
     const closed=await waitFor(async()=> (await state()).recentCards.find(c=>c.id===another.id && c.state==='closed'),'card did not close');
     assert.equal(closed.result,'无需决定');
+    if(modern){const history=await (await fetch(`${base}/api/history?rule=${encodeURIComponent('试一下')}`,{headers})).json();assert.ok(history.runs.length>=2);assert.ok(history.runs.every(run=>run.rule==='试一下'));if(browser){await browser.evaluate("document.querySelector('[data-page=runs]').click();document.querySelector('[data-action=history]').click()");await waitFor(()=>browser.evaluate("!!document.querySelector('#history-rule') && !document.querySelector('#history-search').disabled"),'history form did not load');await browser.evaluate("document.querySelector('#history-rule').value='试一下';document.querySelector('#history-search').click()");await waitFor(()=>browser.evaluate("!document.querySelector('#history-search').disabled && document.querySelector('#history-results')?.textContent.includes('试一下')"),'history did not filter by rule');await browser.evaluate("document.querySelector('#dialog-close').click()");}}
     if(browser) {
       await browser.evaluate("document.querySelector('[data-page=rules]').click()");
       await waitFor(()=>browser.evaluate("!!document.querySelector('[data-action=rule-run][data-id=\"界面新任务\"]')"),'created task was not available to run');
@@ -164,6 +211,13 @@ test('real hub routes a workbench event, receives an answer and completes the fo
       const taskCard=await waitFor(async()=> (await state()).cards.find(c=>c.rule==='界面新任务'),'created task did not run');
       await post({kind:'answer',id:taskCard.id,data:{choice:1}});
       await waitFor(async()=> (await state()).recentCards.find(c=>c.id===taskCard.id&&c.state==='done'),'created task did not complete after answer');
+      await post({kind:'pause',id:'界面新任务',data:{reason:'测试移除'}});
+      const rulesSnapshot=await (await fetch(`${base}/api/rules`,{headers})).json();const nextRules=JSON.parse(rulesSnapshot.text);nextRules.rules=nextRules.rules.filter(r=>r.name!=='界面新任务');
+      const removed=await fetch(`${base}/api/rules`,{method:'POST',headers,body:JSON.stringify({text:JSON.stringify(nextRules),hash:rulesSnapshot.hash,save:true})});assert.equal(removed.status,200);
+      await waitFor(async()=>{const s=await state();return !s.lines.some(r=>r.name==='界面新任务')&&s.pauses.some(p=>p.name==='界面新任务');},'removed pause did not appear in state');
+      await waitFor(()=>browser.evaluate("document.querySelector('#view')?.textContent.includes('已移除但仍暂停')"),'removed pause did not appear in the interface');
+      await browser.evaluate("document.querySelector('[data-action=resume][data-id=\"界面新任务\"]').click()");
+      await waitFor(async()=>!(await state()).pauses.some(p=>p.name==='界面新任务'),'removed rule pause was not resumed');
     }
     const created=await job(['key','new','source','test-source']); assert.equal(created.code,0); assert.match(created.output.trim(),/^[A-Za-z0-9_-]{43}$/);
     const listed=await job(['key','list']); assert.equal(listed.code,0); assert.match(listed.output,/source test-source/);

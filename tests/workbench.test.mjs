@@ -30,6 +30,11 @@ test('workbench protects credentials and validates, routes and saves against an 
     assert.equal((await fetch(`${base}/api/state`)).status,403);
     const headers={'x-workbench-token':token,'content-type':'application/json'};
     const models=await (await fetch(`${base}/api/models`,{headers})).json();assert.deepEqual(models,{models:[{id:'model-a',name:'模型 A',efforts:['high']}]});
+    const health=await (await fetch(`${base}/api/health`,{headers})).json();assert.equal(health.ok,true);assert.equal(health.commit,null);assert.equal(requests.at(-1).url,'/proxy/healthz');assert.equal(requests.at(-1).authorization,undefined);
+    const capabilities=await (await fetch(`${base}/api/capabilities`,{headers})).json();
+    assert.equal(capabilities.delivery,true);
+    if(process.env.WORKBENCH_EXPECT_LEGACY==='1') {for(const name of ['ruleTitle','agentTier','ruleMaxActive','agentMaxActive','defaultChannels','elsewhereModel','zcode','history','replay','eventOutcome'])assert.equal(capabilities[name],false,name);}
+    else {assert.equal(capabilities.ruleTitle,true);assert.equal(capabilities.agentTier,true);assert.equal(capabilities.ruleMaxActive,true);assert.equal(capabilities.agentMaxActive,true);assert.equal(capabilities.defaultChannels,true);assert.equal(capabilities.zcode,true);assert.equal(capabilities.history,true);assert.equal(capabilities.replay,true);assert.equal(capabilities.eventOutcome,true);for(const name of ['review-policy','review-status','auto-merge','toolkit','progress-command','notify-command'])assert.equal(capabilities.deliveryOptions[name],true,name);if(process.env.WORKBENCH_EXPECT_PREVIEW==='1')assert.equal(capabilities.elsewhereModel,true);}
     assert.equal((await fetch(`${base}/api/state`,{headers:{...headers,origin:'https://other.example'}})).status,403);
     assert.equal((await fetch(`${base}/api/state?before=3`,{headers})).status,200);
     assert.equal(requests.at(-1).authorization,'Bearer owner-secret');
@@ -40,6 +45,10 @@ test('workbench protects credentials and validates, routes and saves against an 
     assert.equal(requests.at(-1).authorization,'Bearer other-source-key'); assert.equal(requests.at(-1).text.includes('other-source-key'),false);
     await fetch(`${base}/api/action`,{method:'POST',headers,body:JSON.stringify({kind:'pause',id:'测试 规则',data:{reason:'test'}})});
     assert.equal(requests.at(-1).url,`/proxy/v1/rules/${encodeURIComponent('测试 规则')}/pause`);
+    await fetch(`${base}/api/action`,{method:'POST',headers,body:JSON.stringify({kind:'replay',id:'测试 规则',data:{since:'2026-11-12T01:02:03.456Z'}})});
+    assert.equal(requests.at(-1).url,`/proxy/v1/rules/${encodeURIComponent('测试 规则')}/replay`);assert.deepEqual(JSON.parse(requests.at(-1).text),{since:'2026-11-12T01:02:03.456Z'});
+    await fetch(`${base}/api/event-outcome`,{method:'POST',headers,body:JSON.stringify({id:17,sourceKey:'lookup-source'})});
+    assert.equal(requests.at(-1).url,'/proxy/v1/events/17');assert.equal(requests.at(-1).authorization,'Bearer lookup-source');
     await fetch(`${base}/api/action`,{method:'POST',headers,body:JSON.stringify({kind:'cancel',id:42,data:{}})});
     assert.equal(requests.at(-1).url,'/proxy/v1/runs/42/cancel');
     assert.equal(requests.at(-1).authorization,'Bearer owner-secret');
